@@ -2237,6 +2237,14 @@ bool PlayerbotAI::CastSpell(uint32 spellId)
     // set target
     uint64 targetGUID = m_bot->GetSelection();
     Unit* pTarget = ObjectAccessor::GetUnit(*m_bot, m_bot->GetSelection());
+
+    SpellRangeEntry const* srange = sSpellRangeStore.LookupEntry(pSpellInfo->rangeIndex);
+    float max_range = GetSpellMaxRange(srange, false);
+    float dist = m_bot->GetCombatDistance(pTarget);
+
+    if(dist > max_range)
+        return false;
+
     if (IsPositiveSpell(spellId))
     {
         if (pTarget && !m_bot->IsFriendlyTo(pTarget))

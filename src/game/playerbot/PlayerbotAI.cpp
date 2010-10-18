@@ -2065,9 +2065,7 @@ void PlayerbotAI::MovementReset()
 void PlayerbotAI::MovementUpdate()
 {
     // send heartbeats to world
-    WorldPacket data;
-    m_bot->BuildHeartBeatMsg(&data);
-    m_bot->SendMessageToSet(&data, false);
+    m_bot->SendHeartBeat(false);
 
     // call set position (updates states, exploration, etc.)
     m_bot->SetPosition(m_bot->GetPositionX(), m_bot->GetPositionY(), m_bot->GetPositionZ(), m_bot->GetOrientation(), false);
@@ -2366,9 +2364,7 @@ bool PlayerbotAI::CastSpell(uint32 spellId)
        m_bot->GetPosition(x,y,z);
        m_bot->GetNearPoint(m_bot, x, y, z, 1, 5, 0);
        m_bot->Relocate(x,y,z);
-       WorldPacket data;
-       m_bot->BuildHeartBeatMsg(&data);
-       m_bot->SendMessageToSet(&data,true);
+       m_bot->SendHeartBeat(true);
        }
      */
 

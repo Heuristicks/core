@@ -6,7 +6,7 @@
 #include "../SpellMgr.h"
 #include "../Player.h"
 #include "../ObjectMgr.h"
-#include "../WorldPacket.h"
+#include "WorldPacket.h"
 #include "../Unit.h"
 #include "../SharedDefines.h"
 #include "PlayerbotAI.h"
@@ -28,12 +28,12 @@ public:
     virtual void DoNonCombatActions();
 
     // buff a specific player, usually a real PC who is not in group
-    virtual void BuffPlayer(Player* target);
+    virtual bool BuffPlayer(Player* target);
 
     // Utilities
-    Player* GetMaster () {return m_master; }
-    Player* GetPlayerBot() {return m_bot; }
-    PlayerbotAI* GetAI (){return m_ai; };
+    Player* GetMaster () { return m_master; }
+    Player* GetPlayerBot() { return m_bot; }
+    PlayerbotAI* GetAI (){ return m_ai; };
 
 
 private:

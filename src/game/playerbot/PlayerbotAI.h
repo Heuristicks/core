@@ -117,6 +117,7 @@ public:
         uint32 source;                // 1=bot, 2=master, 3=group
     };
     typedef std::map<uint64, AttackerInfo> AttackerInfoList;
+    typedef std::map<uint32, float> SpellRanges;
 
 public:
     PlayerbotAI(PlayerbotMgr * const mgr, Player * const bot);
@@ -265,7 +266,6 @@ public:
     void SetMovementOrder(MovementOrderType mo, Unit *followTarget = 0);
     MovementOrderType GetMovementOrder() { return this->m_movementOrder; }
     void MovementReset();
-    void MovementUpdate();
     void MovementClear();
     bool IsMoving();
 
@@ -334,7 +334,9 @@ private:
 
     Unit *m_followTarget;       // whom to follow in non combat situation?
 
-    std::map<uint32, float> m_spellRangeMap;
+    SpellRanges m_spellRangeMap;
+
+    float m_destX, m_destY, m_destZ; // latest coordinates for chase and point movement types
 };
 
 #endif

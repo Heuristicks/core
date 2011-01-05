@@ -25,6 +25,7 @@
 #include "../SharedDefines.h"
 #include "Log.h"
 #include "../GossipDef.h"
+#include "../MotionMaster.h"
 
 // returns a float in range of..
 float rand_float(float low, float high)
@@ -1424,8 +1425,6 @@ void PlayerbotAI::GetCombatTarget(Unit* forcedTarget)
     // add thingToAttack to loot list
     m_lootCreature.push_back(m_targetCombat->GetGUID());
 
-    // set movement generators for combat movement
-    MovementClear();
     return;
 }
 
@@ -2076,15 +2075,6 @@ void PlayerbotAI::MovementReset()
     }
 }
 
-void PlayerbotAI::MovementUpdate()
-{
-    // send heartbeats to world
-    // m_bot->SendHeartBeat(false);
-
-    // call set position (updates states, exploration, etc.)
-    m_bot->SetPosition(m_bot->GetPositionX(), m_bot->GetPositionY(), m_bot->GetPositionZ(), m_bot->GetOrientation(), false);
-}
-
 void PlayerbotAI::MovementClear()
 {
     // stop...
@@ -2104,6 +2094,9 @@ bool PlayerbotAI::IsMoving()
 
 void PlayerbotAI::SetInFront(const Unit* obj)
 {
+    if (IsMoving())
+        return;
+
     m_bot->SetInFront(obj);
 
     // TODO: Schmoozerd wrote a patch which adds MovementInfo::ChangeOrientation()
@@ -2134,15 +2127,27 @@ void PlayerbotAI::UpdateAI(const uint32 p_time)
     if (m_bot->IsBeingTeleported() || m_bot->GetTrader())
         return;
 
+    // Send updates to world if chasing target or moving to point
+    MovementGeneratorType movementType = m_bot->GetMotionMaster()->GetCurrentMovementGeneratorType();
+    if (movementType == CHASE_MOTION_TYPE || movementType == POINT_MOTION_TYPE)
+    {
+        float x, y, z;
+        m_bot->GetMotionMaster()->GetDestination(x, y, z);
+        if (x != m_destX || y != m_destY || z != m_destZ)
+        {
+            m_bot->SendMonsterMoveWithSpeed(x, y, z);
+            m_destX = x;
+            m_destY = y;
+            m_destZ = z;
+        }
+    }
+
     time_t currentTime = time(0);
     if (currentTime < m_ignoreAIUpdatesUntilTime)
         return;
 
     // default updates occur every two seconds
     m_ignoreAIUpdatesUntilTime = time(0) + 2;
-
-    // send heartbeat
-    MovementUpdate();
 
     if (!m_bot->isAlive())
     {
@@ -2341,7 +2346,7 @@ bool PlayerbotAI::CastSpell(uint32 spellId)
         pTarget = m_bot;
 
     // Check spell range
-    std::map<uint32, float>::iterator it = m_spellRangeMap.find(spellId);
+    SpellRanges::iterator it = m_spellRangeMap.find(spellId);
     if (it != m_spellRangeMap.end() && (int)it->second != 0)
     {
         float dist = m_bot->GetCombatDistance(pTarget);
@@ -2440,10 +2445,7 @@ bool PlayerbotAI::CastPetSpell(uint32 spellId, Unit* target)
             return false;
 
         if (!pet->isInFrontInMap(pTarget, 10)) // distance probably should be calculated
-        {
             pet->SetInFront(pTarget);
-            MovementUpdate();
-        }
     }
 
     pet->CastSpell(pTarget, pSpellInfo, false);
@@ -2464,6 +2466,9 @@ bool PlayerbotAI::Buff(uint32 spellId, Unit* target, void (*beforeCast)(Player *
     SpellEntry const * spellProto = sSpellStore.LookupEntry(spellId);
 
     if (!spellProto)
+        return false;
+
+    if (!target)
         return false;
 
     // Select appropriate spell rank for target's level
@@ -3825,7 +3830,7 @@ void PlayerbotAI::HandleCommand(const std::string& text, Player& fromPlayer)
         SendWhisper(detectout.str().c_str(), fromPlayer);
     }
 
-    // stats project: 10:00 19/04/10 rev.1 display bot statistics
+    // stats project: 11:30 15/12/10 rev.2 display bot statistics
     else if (text == "stats")
     {
         std::ostringstream out;
@@ -3842,7 +3847,7 @@ void PlayerbotAI::HandleCommand(const std::string& text, Player& fromPlayer)
         // list out items in other removable backpacks
         for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
         {
-            const Bag* const pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+            const Bag* const pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
             if (pBag)
             {
                 ItemPrototype const* pBagProto = pBag->GetProto();
@@ -3852,29 +3857,34 @@ void PlayerbotAI::HandleCommand(const std::string& text, Player& fromPlayer)
 
         }
 
-        // calculate how much money bot has
-        uint32 copper = m_bot->GetMoney();
+        // estimate how much item damage the bot has
+        uint32 copper = EstRepairAll();
         uint32 gold = uint32(copper / 10000);
         copper -= (gold * 10000);
         uint32 silver = uint32(copper / 100);
         copper -= (silver * 100);
 
-        out << "|cffffffff[|h|cff00ffff" << m_bot->GetName() << "|h|cffffffff]" << " has |r|cff00ff00" << gold
-            << "|r|cfffffc00g|r|cff00ff00" << silver
-            << "|r|cffcdcdcds|r|cff00ff00" << copper
-            << "|r|cffffd333c" << "|h|cffffffff bag slots |h|cff00ff00" << totalfree;
+        out << "|cffffffff[|h|cff00ffff" << m_bot->GetName() << "|h|cffffffff] has |cff00ff00";
+        out << totalfree << " |h|cffffffff bag slots,|h" << " |cff00ff00";
+        if (gold > 0)
+            out << "|r|cff00ff00" << gold <<  " |TInterface\\Icons\\INV_Misc_Coin_01:8|t";
+        if (silver > 0)
+            out << silver <<  " |TInterface\\Icons\\INV_Misc_Coin_03:8|t";
+        out << copper <<  " |TInterface\\Icons\\INV_Misc_Coin_05:8|t";
 
-        // estimate how much item damage the bot has
-        copper = EstRepairAll();
+        // calculate how much money bot has
+        copper = m_bot->GetMoney();
         gold = uint32(copper / 10000);
         copper -= (gold * 10000);
         silver = uint32(copper / 100);
         copper -= (silver * 100);
 
-        out << "|h|cffffffff & item damage cost " << "|r|cff00ff00" << gold
-            << "|r|cfffffc00g|r|cff00ff00" << silver
-            << "|r|cffcdcdcds|r|cff00ff00" << copper
-            << "|r|cffffd333c";
+        out << "|h|cffffffff item damage & has " << "|r|cff00ff00";
+        if (gold > 0)
+            out << gold <<  " |TInterface\\Icons\\INV_Misc_Coin_01:8|t";
+        if (silver > 0)
+            out << silver <<  " |TInterface\\Icons\\INV_Misc_Coin_03:8|t";
+        out << copper <<  " |TInterface\\Icons\\INV_Misc_Coin_05:8|t";
         ChatHandler ch(&fromPlayer);
         ch.SendSysMessage(out.str().c_str());
     }

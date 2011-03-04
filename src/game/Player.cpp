@@ -34,7 +34,7 @@
 #include "Channel.h"
 #include "ChannelMgr.h"
 #include "MapManager.h"
-#include "InstanceSaveMgr.h"
+#include "MapPersistentStateMgr.h"
 #include "InstanceData.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
@@ -635,7 +635,7 @@ Player::~Player ()
     // clean up player-instance binds, may unload some instance saves
     for(uint8 i = 0; i < MAX_DIFFICULTY; ++i)
         for(BoundInstancesMap::iterator itr = m_boundInstances[i].begin(); itr != m_boundInstances[i].end(); ++itr)
-            itr->second.save->RemovePlayer(this);
+            itr->second.state->RemovePlayer(this);
 
     delete m_declinedname;
     delete m_runes;
@@ -758,8 +758,8 @@ bool Player::Create( uint32 guidlow, const std::string& name, uint8 race, uint8 
     InitRunes();
 
     SetUInt32Value (PLAYER_FIELD_COINAGE, sWorld.getConfig(CONFIG_UINT32_START_PLAYER_MONEY));
-    SetUInt32Value (PLAYER_FIELD_HONOR_CURRENCY, sWorld.getConfig(CONFIG_UINT32_START_HONOR_POINTS));
-    SetUInt32Value (PLAYER_FIELD_ARENA_CURRENCY, sWorld.getConfig(CONFIG_UINT32_START_ARENA_POINTS));
+    SetHonorPoints(sWorld.getConfig(CONFIG_UINT32_START_HONOR_POINTS));
+    SetArenaPoints(sWorld.getConfig(CONFIG_UINT32_START_ARENA_POINTS));
 
     // Played time
     m_Last_tick = time(NULL);
@@ -2069,6 +2069,9 @@ void Player::RemoveFromWorld()
     ///- Do not add/remove the player from the object storage
     ///- It will crash when updating the ObjectAccessor
     ///- The player should only be removed when logging out
+    if (IsInWorld())
+        GetCamera().ResetView();
+
     Unit::RemoveFromWorld();
 }
 
@@ -4626,7 +4629,7 @@ Corpse* Player::CreateCorpse()
     Corpse *corpse = new Corpse( (m_ExtraFlags & PLAYER_EXTRA_PVP_DEATH) ? CORPSE_RESURRECTABLE_PVP : CORPSE_RESURRECTABLE_PVE );
     SetPvPDeath(false);
 
-    if (!corpse->Create(sObjectMgr.GenerateLowGuid(HIGHGUID_CORPSE), this))
+    if (!corpse->Create(sObjectMgr.GenerateCorpseLowGuid(), this))
     {
         delete corpse;
         return NULL;
@@ -6017,7 +6020,9 @@ bool Player::IsActionButtonDataValid(uint8 button, uint32 action, uint8 type, Pl
     switch(type)
     {
         case ACTION_BUTTON_SPELL:
-            if(!sSpellStore.LookupEntry(action))
+        {
+            SpellEntry const* spellProto = sSpellStore.LookupEntry(action);
+            if(!spellProto)
             {
                 if (msg)
                 {
@@ -6029,14 +6034,33 @@ bool Player::IsActionButtonDataValid(uint8 button, uint32 action, uint8 type, Pl
                 return false;
             }
 
-            if(player && !player->HasSpell(action))
+            if(player)
             {
-                if (msg)
-                    sLog.outError( "Spell action %u not added into button %u for player %s: player don't known this spell", action, button, player->GetName() );
-                return false;
+                if(!player->HasSpell(spellProto->Id))
+                {
+                    if (msg)
+                        sLog.outError( "Spell action %u not added into button %u for player %s: player don't known this spell", action, button, player->GetName() );
+                    return false;
+                }
+                else if(IsPassiveSpell(spellProto))
+                {
+                    if (msg)
+                        sLog.outError( "Spell action %u not added into button %u for player %s: spell is passive", action, button, player->GetName() );
+                    return false;
+                }
+                // current range for button of totem bar is from ACTION_BUTTON_SHAMAN_TOTEMS_BAR to (but not including) ACTION_BUTTON_SHAMAN_TOTEMS_BAR + 12
+                else if(button >= ACTION_BUTTON_SHAMAN_TOTEMS_BAR && button < (ACTION_BUTTON_SHAMAN_TOTEMS_BAR + 12)
+                    && !(spellProto->AttributesEx7 & SPELL_ATTR_EX7_TOTEM_SPELL))
+                {
+                    if (msg)
+                        sLog.outError( "Spell action %u not added into button %u for player %s: attempt to add non totem spell to totem bar", action, button, player->GetName() );
+                    return false;
+                }
             }
             break;
+        }
         case ACTION_BUTTON_ITEM:
+        {
             if(!ObjectMgr::GetItemPrototype(action))
             {
                 if (msg)
@@ -6049,6 +6073,7 @@ bool Player::IsActionButtonDataValid(uint8 button, uint32 action, uint8 type, Pl
                 return false;
             }
             break;
+        }
         default:
             break;                                          // other cases not checked at this moment
     }
@@ -6653,30 +6678,40 @@ bool Player::RewardHonor(Unit *uVictim, uint32 groupsize, float honor)
     return true;
 }
 
-void Player::ModifyHonorPoints( int32 value )
+void Player::SetHonorPoints(uint32 value)
 {
-    if(value < 0)
-    {
-        if (GetHonorPoints() > sWorld.getConfig(CONFIG_UINT32_MAX_HONOR_POINTS))
-            SetUInt32Value(PLAYER_FIELD_HONOR_CURRENCY, sWorld.getConfig(CONFIG_UINT32_MAX_HONOR_POINTS) + value);
-        else
-            SetUInt32Value(PLAYER_FIELD_HONOR_CURRENCY, GetHonorPoints() > uint32(-value) ? GetHonorPoints() + value : 0);
-    }
-    else
-        SetUInt32Value(PLAYER_FIELD_HONOR_CURRENCY, GetHonorPoints() < sWorld.getConfig(CONFIG_UINT32_MAX_HONOR_POINTS) - value ? GetHonorPoints() + value : sWorld.getConfig(CONFIG_UINT32_MAX_HONOR_POINTS));
+    if (value > sWorld.getConfig(CONFIG_UINT32_MAX_HONOR_POINTS))
+        value = sWorld.getConfig(CONFIG_UINT32_MAX_HONOR_POINTS);
+
+    SetUInt32Value(PLAYER_FIELD_HONOR_CURRENCY, value);
 }
 
-void Player::ModifyArenaPoints( int32 value )
+void Player::SetArenaPoints(uint32 value)
 {
-    if(value < 0)
-    {
-        if (GetArenaPoints() > sWorld.getConfig(CONFIG_UINT32_MAX_ARENA_POINTS))
-            SetUInt32Value(PLAYER_FIELD_ARENA_CURRENCY, sWorld.getConfig(CONFIG_UINT32_MAX_ARENA_POINTS) + value);
-        else
-            SetUInt32Value(PLAYER_FIELD_ARENA_CURRENCY, GetArenaPoints() > uint32(-value) ? GetArenaPoints() + value : 0);
-    }
-    else
-        SetUInt32Value(PLAYER_FIELD_ARENA_CURRENCY, GetArenaPoints() < sWorld.getConfig(CONFIG_UINT32_MAX_ARENA_POINTS) - value ? GetArenaPoints() + value : sWorld.getConfig(CONFIG_UINT32_MAX_ARENA_POINTS));
+    if (value > sWorld.getConfig(CONFIG_UINT32_MAX_ARENA_POINTS))
+        value = sWorld.getConfig(CONFIG_UINT32_MAX_ARENA_POINTS);
+
+    SetUInt32Value(PLAYER_FIELD_ARENA_CURRENCY, value);
+}
+
+void Player::ModifyHonorPoints(int32 value)
+{
+    int32 newValue = (int32)GetHonorPoints() + value;
+
+    if (newValue < 0)
+        newValue = 0;
+
+    SetHonorPoints(newValue);
+}
+
+void Player::ModifyArenaPoints(int32 value)
+{
+    int32 newValue = (int32)GetArenaPoints() + value;
+
+    if (newValue < 0)
+        newValue = 0;
+
+    SetArenaPoints(newValue);
 }
 
 uint32 Player::GetGuildIdFromDB(ObjectGuid guid)
@@ -7525,6 +7560,46 @@ void Player::UpdateEquipSpellsAtFormChange()
     }
 }
 
+/// handles unique effect of Deadly Poison: apply poison of the other weapon when already at max. stack
+void Player::_HandleDeadlyPoison(Unit* Target, WeaponAttackType attType, SpellEntry const *spellInfo)
+{
+    SpellAuraHolder const* dPoison = NULL;
+    SpellAuraHolderConstBounds holders = Target->GetSpellAuraHolderBounds(spellInfo->Id);
+    for (SpellAuraHolderMap::const_iterator iter = holders.first; iter != holders.second; ++iter)
+    {
+        if (iter->second->GetCaster() == this)
+        {
+            dPoison = iter->second;
+            break;
+        }
+    }
+    if (dPoison && dPoison->GetStackAmount() == spellInfo->StackAmount)
+    {
+        Item *otherWeapon = GetWeaponForAttack(attType == BASE_ATTACK ? OFF_ATTACK : BASE_ATTACK );
+        if (!otherWeapon)
+            return;
+
+        // all poison enchantments are temporary
+        uint32 enchant_id = otherWeapon->GetEnchantmentId(TEMP_ENCHANTMENT_SLOT);
+        if (!enchant_id)
+            return;
+
+        SpellItemEnchantmentEntry const* pSecondEnchant = sSpellItemEnchantmentStore.LookupEntry(enchant_id);
+        if (!pSecondEnchant)
+            return;
+
+        for (int s = 0; s < 3; ++s)
+        {
+            if (pSecondEnchant->type[s] != ITEM_ENCHANTMENT_TYPE_COMBAT_SPELL)
+                continue;
+
+            SpellEntry const* combatEntry = sSpellStore.LookupEntry(pSecondEnchant->spellid[s]);
+            if (combatEntry && combatEntry->Dispel == DISPEL_POISON)
+                CastSpell(Target, combatEntry, true, otherWeapon);
+        }
+    }
+}
+
 void Player::CastItemCombatSpell(Unit* Target, WeaponAttackType attType)
 {
     Item *item = GetWeaponForAttack(attType, true, false);
@@ -7611,7 +7686,13 @@ void Player::CastItemCombatSpell(Unit* Target, WeaponAttackType attType)
                 if(IsPositiveSpell(pEnchant->spellid[s]))
                     CastSpell(this, pEnchant->spellid[s], true, item);
                 else
+                {
+                    // Deadly Poison, unique effect needs to be handled before casting triggered spell
+                    if (spellInfo->SpellFamilyName == SPELLFAMILY_ROGUE && spellInfo->SpellFamilyFlags & UI64LIT(0x10000))
+                        _HandleDeadlyPoison(Target, attType, spellInfo);
+
                     CastSpell(Target, pEnchant->spellid[s], true, item);
+                }
             }
         }
     }
@@ -8008,7 +8089,7 @@ void Player::SendLoot(ObjectGuid guid, LootType loot_type)
                         item->SetLootState(ITEM_LOOT_TEMPORARY);
                         break;
                     default:
-                        loot->FillLoot(item->GetEntry(), LootTemplates_Item, this, item->GetProto()->MaxMoneyLoot == 0);
+                        loot->FillLoot(item->GetEntry(), LootTemplates_Item, this, true, item->GetProto()->MaxMoneyLoot == 0);
                         loot->generateMoneyLoot(item->GetProto()->MinMoneyLoot, item->GetProto()->MaxMoneyLoot);
                         item->SetLootState(ITEM_LOOT_CHANGED);
                         break;
@@ -12809,8 +12890,11 @@ void Player::PrepareGossipMenu(WorldObject *pSource, uint32 menuId)
 
     GossipMenuItemsMapBounds pMenuItemBounds = sObjectMgr.GetGossipMenuItemsMapBounds(menuId);
 
-    // if default menuId and no menu options exist for this, use options from default options
-    if (pMenuItemBounds.first == pMenuItemBounds.second && menuId == GetDefaultGossipMenuForSource(pSource))
+    // prepares quest menu when true
+    bool canSeeQuests = menuId == GetDefaultGossipMenuForSource(pSource);
+
+    // if canSeeQuests (the default, top level menu) and no menu options exist for this, use options from default options
+    if (pMenuItemBounds.first == pMenuItemBounds.second && canSeeQuests)
         pMenuItemBounds = sObjectMgr.GetGossipMenuItemsMapBounds(0);
 
     bool canTalkToCredit = pSource->GetTypeId() == TYPEID_UNIT;
@@ -12820,13 +12904,25 @@ void Player::PrepareGossipMenu(WorldObject *pSource, uint32 menuId)
         bool hasMenuItem = true;
 
         if (itr->second.cond_1 && !sObjectMgr.IsPlayerMeetToCondition(this, itr->second.cond_1))
+        {
+            if (itr->second.option_id == GOSSIP_OPTION_QUESTGIVER)
+                canSeeQuests = false;
             continue;
+        }
 
         if (itr->second.cond_2 && !sObjectMgr.IsPlayerMeetToCondition(this, itr->second.cond_2))
+        {
+            if (itr->second.option_id == GOSSIP_OPTION_QUESTGIVER)
+                canSeeQuests = false;
             continue;
+        }
 
         if (itr->second.cond_3 && !sObjectMgr.IsPlayerMeetToCondition(this, itr->second.cond_3))
+        {
+            if (itr->second.option_id == GOSSIP_OPTION_QUESTGIVER)
+                canSeeQuests = false;
             continue;
+        }
 
         if (pSource->GetTypeId() == TYPEID_UNIT)
         {
@@ -12844,7 +12940,6 @@ void Player::PrepareGossipMenu(WorldObject *pSource, uint32 menuId)
                         canTalkToCredit = false;
                     break;
                 case GOSSIP_OPTION_QUESTGIVER:
-                    PrepareQuestMenu(pSource->GetObjectGuid());
                     hasMenuItem = false;
                     break;
                 case GOSSIP_OPTION_ARMORER:
@@ -12937,8 +13032,6 @@ void Player::PrepareGossipMenu(WorldObject *pSource, uint32 menuId)
             switch(itr->second.option_id)
             {
                 case GOSSIP_OPTION_QUESTGIVER:
-                    if (pGo->GetGoType() == GAMEOBJECT_TYPE_QUESTGIVER)
-                        PrepareQuestMenu(pSource->GetObjectGuid());
                     hasMenuItem = false;
                     break;
                 case GOSSIP_OPTION_GOSSIP:
@@ -12976,6 +13069,9 @@ void Player::PrepareGossipMenu(WorldObject *pSource, uint32 menuId)
             pMenu->GetGossipMenu().AddGossipMenuItemData(itr->second.action_menu_id, itr->second.action_poi_id, itr->second.action_script_id);
         }
     }
+
+    if (canSeeQuests)
+        PrepareQuestMenu(pSource->GetObjectGuid());
 
     if (canTalkToCredit)
     {
@@ -13223,10 +13319,10 @@ void Player::OnGossipSelect(WorldObject* pSource, uint32 gossipListId, uint32 me
 
 uint32 Player::GetGossipTextId(WorldObject *pSource)
 {
-    if (!pSource || pSource->GetTypeId() != TYPEID_UNIT || !((Creature*)pSource)->GetDBTableGUIDLow())
+    if (!pSource || pSource->GetTypeId() != TYPEID_UNIT)
         return DEFAULT_GOSSIP_MESSAGE;
 
-    if (uint32 pos = sObjectMgr.GetNpcGossip(((Creature*)pSource)->GetDBTableGUIDLow()))
+    if (uint32 pos = sObjectMgr.GetNpcGossip(((Creature*)pSource)->GetGUIDLow()))
         return pos;
 
     return DEFAULT_GOSSIP_MESSAGE;
@@ -15389,11 +15485,7 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder *holder )
 
     _LoadArenaTeamInfo(holder->GetResult(PLAYER_LOGIN_QUERY_LOADARENAINFO));
 
-    uint32 arena_currency = fields[39].GetUInt32();
-    if (arena_currency > sWorld.getConfig(CONFIG_UINT32_MAX_ARENA_POINTS))
-        arena_currency = sWorld.getConfig(CONFIG_UINT32_MAX_ARENA_POINTS);
-
-    SetUInt32Value(PLAYER_FIELD_ARENA_CURRENCY, arena_currency);
+    SetArenaPoints(fields[39].GetUInt32());
 
     // check arena teams integrity
     for(uint32 arena_slot = 0; arena_slot < MAX_ARENA_SLOT; ++arena_slot)
@@ -15411,10 +15503,7 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder *holder )
             SetArenaTeamInfoField(arena_slot, ArenaTeamInfoType(j), 0);
     }
 
-    uint32 honor_currency = fields[40].GetUInt32();
-    if (honor_currency > sWorld.getConfig(CONFIG_UINT32_MAX_HONOR_POINTS))
-        honor_currency = sWorld.getConfig(CONFIG_UINT32_MAX_HONOR_POINTS);
-    SetUInt32Value(PLAYER_FIELD_HONOR_CURRENCY, honor_currency);
+    SetHonorPoints(fields[40].GetUInt32());
 
     SetUInt32Value(PLAYER_FIELD_TODAY_CONTRIBUTION, fields[41].GetUInt32());
     SetUInt32Value(PLAYER_FIELD_YESTERDAY_CONTRIBUTION, fields[42].GetUInt32());
@@ -15551,13 +15640,13 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder *holder )
     }
 
     // player bounded instance saves loaded in _LoadBoundInstances, group versions at group loading
-    InstanceSave* instanceSave = GetBoundInstanceSaveForSelfOrGroup(GetMapId());
+    DungeonPersistentState* state = GetBoundInstanceSaveForSelfOrGroup(GetMapId());
 
     // load the player's map here if it's not already loaded
     SetMap(sMapMgr.CreateMap(GetMapId(), this));
 
     // if the player is in an instance and it has been reset in the meantime teleport him to the entrance
-    if(GetInstanceId() && !instanceSave)
+    if(GetInstanceId() && !state)
     {
         AreaTrigger const* at = sObjectMgr.GetMapEntranceTrigger(GetMapId());
         if(at)
@@ -16779,8 +16868,8 @@ void Player::_LoadBoundInstances(QueryResult *result)
             }
 
             // since non permanent binds are always solo bind, they can always be reset
-            InstanceSave *save = sInstanceSaveMgr.AddInstanceSave(mapId, instanceId, Difficulty(difficulty), resetTime, !perm, true);
-            if(save) BindToInstance(save, perm, true);
+            DungeonPersistentState *state = (DungeonPersistentState*)sMapPersistentStateMgr.AddPersistentState(mapEntry, instanceId, Difficulty(difficulty), resetTime, !perm, true);
+            if(state) BindToInstance(state, perm, true);
         } while(result->NextRow());
         delete result;
     }
@@ -16810,65 +16899,76 @@ void Player::UnbindInstance(BoundInstancesMap::iterator &itr, Difficulty difficu
 {
     if(itr != m_boundInstances[difficulty].end())
     {
-        if(!unload) CharacterDatabase.PExecute("DELETE FROM character_instance WHERE guid = '%u' AND instance = '%u'", GetGUIDLow(), itr->second.save->GetInstanceId());
-        itr->second.save->RemovePlayer(this);               // save can become invalid
+        if (!unload)
+            CharacterDatabase.PExecute("DELETE FROM character_instance WHERE guid = '%u' AND instance = '%u'",
+                GetGUIDLow(), itr->second.state->GetInstanceId());
+        itr->second.state->RemovePlayer(this);              // state can become invalid
         m_boundInstances[difficulty].erase(itr++);
     }
 }
 
-InstancePlayerBind* Player::BindToInstance(InstanceSave *save, bool permanent, bool load)
+InstancePlayerBind* Player::BindToInstance(DungeonPersistentState *state, bool permanent, bool load)
 {
-    if(save)
+    if (state)
     {
-        InstancePlayerBind& bind = m_boundInstances[save->GetDifficulty()][save->GetMapId()];
-        if(bind.save)
+        InstancePlayerBind& bind = m_boundInstances[state->GetDifficulty()][state->GetMapId()];
+        if (bind.state)
         {
-            // update the save when the group kills a boss
-            if(permanent != bind.perm || save != bind.save)
-                if(!load) CharacterDatabase.PExecute("UPDATE character_instance SET instance = '%u', permanent = '%u' WHERE guid = '%u' AND instance = '%u'", save->GetInstanceId(), permanent, GetGUIDLow(), bind.save->GetInstanceId());
+            // update the state when the group kills a boss
+            if(permanent != bind.perm || state != bind.state)
+                if (!load)
+                    CharacterDatabase.PExecute("UPDATE character_instance SET instance = '%u', permanent = '%u' WHERE guid = '%u' AND instance = '%u'",
+                        state->GetInstanceId(), permanent, GetGUIDLow(), bind.state->GetInstanceId());
         }
         else
-            if(!load) CharacterDatabase.PExecute("INSERT INTO character_instance (guid, instance, permanent) VALUES ('%u', '%u', '%u')", GetGUIDLow(), save->GetInstanceId(), permanent);
-
-        if(bind.save != save)
         {
-            if(bind.save)
-                bind.save->RemovePlayer(this);
-            save->AddPlayer(this);
+            if (!load)
+                CharacterDatabase.PExecute("INSERT INTO character_instance (guid, instance, permanent) VALUES ('%u', '%u', '%u')",
+                    GetGUIDLow(), state->GetInstanceId(), permanent);
         }
 
-        if(permanent) save->SetCanReset(false);
+        if (bind.state != state)
+        {
+            if (bind.state)
+                bind.state->RemovePlayer(this);
+            state->AddPlayer(this);
+        }
 
-        bind.save = save;
+        if (permanent)
+            state->SetCanReset(false);
+
+        bind.state = state;
         bind.perm = permanent;
-        if(!load) DEBUG_LOG("Player::BindToInstance: %s(%d) is now bound to map %d, instance %d, difficulty %d", GetName(), GetGUIDLow(), save->GetMapId(), save->GetInstanceId(), save->GetDifficulty());
+        if (!load)
+            DEBUG_LOG("Player::BindToInstance: %s(%d) is now bound to map %d, instance %d, difficulty %d",
+                GetName(), GetGUIDLow(), state->GetMapId(), state->GetInstanceId(), state->GetDifficulty());
         return &bind;
     }
     else
         return NULL;
 }
 
-InstanceSave* Player::GetBoundInstanceSaveForSelfOrGroup(uint32 mapid)
+DungeonPersistentState* Player::GetBoundInstanceSaveForSelfOrGroup(uint32 mapid)
 {
     MapEntry const* mapEntry = sMapStore.LookupEntry(mapid);
-    if(!mapEntry)
+    if (!mapEntry)
         return NULL;
 
     InstancePlayerBind *pBind = GetBoundInstance(mapid, GetDifficulty(mapEntry->IsRaid()));
-    InstanceSave *pSave = pBind ? pBind->save : NULL;
+    DungeonPersistentState *state = pBind ? pBind->state : NULL;
 
     // the player's permanent player bind is taken into consideration first
     // then the player's group bind and finally the solo bind.
-    if(!pBind || !pBind->perm)
+    if (!pBind || !pBind->perm)
     {
         InstanceGroupBind *groupBind = NULL;
-        Group *group = GetGroup();
         // use the player's difficulty setting (it may not be the same as the group's)
-        if(group && (groupBind = group->GetBoundInstance(mapid, this)))
-            pSave = groupBind->save;
+        if (Group *group = GetGroup())
+            if (groupBind = group->GetBoundInstance(mapid, this))
+                state = groupBind->state;
     }
 
-    return pSave;
+    return state;
 }
 
 void Player::SendRaidInfo()
@@ -16886,15 +16986,15 @@ void Player::SendRaidInfo()
     {
         for (BoundInstancesMap::const_iterator itr = m_boundInstances[i].begin(); itr != m_boundInstances[i].end(); ++itr)
         {
-            if(itr->second.perm)
+            if (itr->second.perm)
             {
-                InstanceSave *save = itr->second.save;
-                data << uint32(save->GetMapId());           // map id
-                data << uint32(save->GetDifficulty());      // difficulty
-                data << ObjectGuid(save->GetInstanceGuid());// instance guid
+                DungeonPersistentState *state = itr->second.state;
+                data << uint32(state->GetMapId());          // map id
+                data << uint32(state->GetDifficulty());     // difficulty
+                data << ObjectGuid(state->GetInstanceGuid());// instance guid
                 data << uint8(1);                           // expired = 0
                 data << uint8(0);                           // extended = 1
-                data << uint32(save->GetResetTime() - now); // reset time
+                data << uint32(state->GetResetTime() - now);// reset time
                 ++counter;
             }
         }
@@ -16938,7 +17038,7 @@ void Player::SendSavedInstances()
             if(itr->second.perm)
             {
                 data.Initialize(SMSG_UPDATE_LAST_INSTANCE);
-                data << uint32(itr->second.save->GetMapId());
+                data << uint32(itr->second.state->GetMapId());
                 GetSession()->SendPacket(&data);
             }
         }
@@ -16963,16 +17063,19 @@ void Player::ConvertInstancesToGroup(Player *player, Group *group, ObjectGuid pl
     // copy all binds to the group, when changing leader it's assumed the character
     // will not have any solo binds
 
-    if(player)
+    if (player)
     {
         for(uint8 i = 0; i < MAX_DIFFICULTY; ++i)
         {
             for (BoundInstancesMap::iterator itr = player->m_boundInstances[i].begin(); itr != player->m_boundInstances[i].end();)
             {
                 has_binds = true;
-                if(group) group->BindToInstance(itr->second.save, itr->second.perm, true);
+
+                if (group)
+                    group->BindToInstance(itr->second.state, itr->second.perm, true);
+
                 // permanent binds are not removed
-                if(!itr->second.perm)
+                if (!itr->second.perm)
                 {
                     // increments itr in call
                     player->UnbindInstance(itr, Difficulty(i), true);
@@ -16987,11 +17090,11 @@ void Player::ConvertInstancesToGroup(Player *player, Group *group, ObjectGuid pl
     uint32 player_lowguid = player_guid.GetCounter();
 
     // if the player's not online we don't know what binds it has
-    if(!player || !group || has_binds)
+    if (!player || !group || has_binds)
         CharacterDatabase.PExecute("INSERT INTO group_instance SELECT guid, instance, permanent FROM character_instance WHERE guid = '%u'", player_lowguid);
 
     // the following should not get executed when changing leaders
-    if(!player || has_solo)
+    if (!player || has_solo)
         CharacterDatabase.PExecute("DELETE FROM character_instance WHERE guid = '%u' AND permanent = 0", player_lowguid);
 }
 
@@ -17875,18 +17978,18 @@ void Player::ResetInstances(InstanceResetMethod method, bool isRaid)
 
     for (BoundInstancesMap::iterator itr = m_boundInstances[diff].begin(); itr != m_boundInstances[diff].end();)
     {
-        InstanceSave *p = itr->second.save;
+        DungeonPersistentState *state = itr->second.state;
         const MapEntry *entry = sMapStore.LookupEntry(itr->first);
-        if(!entry || entry->IsRaid() != isRaid || !p->CanReset())
+        if (!entry || entry->IsRaid() != isRaid || !state->CanReset())
         {
             ++itr;
             continue;
         }
 
-        if(method == INSTANCE_RESET_ALL)
+        if (method == INSTANCE_RESET_ALL)
         {
             // the "reset all instances" method can only reset normal maps
-            if(entry->map_type == MAP_RAID || diff == DUNGEON_DIFFICULTY_HEROIC)
+            if (entry->map_type == MAP_RAID || diff == DUNGEON_DIFFICULTY_HEROIC)
             {
                 ++itr;
                 continue;
@@ -17894,19 +17997,19 @@ void Player::ResetInstances(InstanceResetMethod method, bool isRaid)
         }
 
         // if the map is loaded, reset it
-        Map *map = sMapMgr.FindMap(p->GetMapId(), p->GetInstanceId());
-        if(map && map->IsDungeon())
-            ((InstanceMap*)map)->Reset(method);
+        if (Map *map = sMapMgr.FindMap(state->GetMapId(), state->GetInstanceId()))
+            if (map->IsDungeon())
+                ((DungeonMap*)map)->Reset(method);
 
         // since this is a solo instance there should not be any players inside
-        if(method == INSTANCE_RESET_ALL || method == INSTANCE_RESET_CHANGE_DIFFICULTY)
-            SendResetInstanceSuccess(p->GetMapId());
+        if (method == INSTANCE_RESET_ALL || method == INSTANCE_RESET_CHANGE_DIFFICULTY)
+            SendResetInstanceSuccess(state->GetMapId());
 
-        p->DeleteFromDB();
+        state->DeleteFromDB();
         m_boundInstances[diff].erase(itr++);
 
         // the following should remove the instance save from the manager and delete it as well
-        p->RemovePlayer(this);
+        state->RemovePlayer(this);
     }
 }
 
@@ -18831,6 +18934,22 @@ void Player::InitDisplayIds()
     }
 }
 
+void Player::TakeExtendedCost(uint32 extendedCostId, uint32 count)
+{
+    ItemExtendedCostEntry const* extendedCost = sItemExtendedCostStore.LookupEntry(extendedCostId);
+
+    if (extendedCost->reqhonorpoints)
+        ModifyHonorPoints(-int32(extendedCost->reqhonorpoints * count));
+    if (extendedCost->reqarenapoints)
+        ModifyArenaPoints(-int32(extendedCost->reqarenapoints * count));
+
+    for (uint8 i = 0; i < MAX_EXTENDED_COST_ITEMS; ++i)
+    {
+        if (extendedCost->reqitem[i])
+            DestroyItemCount(extendedCost->reqitem[i], extendedCost->reqitemcount[i] * count, true);
+    }
+}
+
 // Return true is the bought item has a max count to force refresh of window by caller
 bool Player::BuyItemFromVendorSlot(ObjectGuid vendorGuid, uint32 vendorslot, uint32 item, uint8 count, uint8 bag, uint8 slot)
 {
@@ -18840,10 +18959,10 @@ bool Player::BuyItemFromVendorSlot(ObjectGuid vendorGuid, uint32 vendorslot, uin
     if (!isAlive())
         return false;
 
-    ItemPrototype const *pProto = ObjectMgr::GetItemPrototype( item );
+    ItemPrototype const *pProto = ObjectMgr::GetItemPrototype(item);
     if (!pProto)
     {
-        SendBuyError( BUY_ERR_CANT_FIND_ITEM, NULL, item, 0);
+        SendBuyError(BUY_ERR_CANT_FIND_ITEM, NULL, item, 0);
         return false;
     }
 
@@ -18859,7 +18978,7 @@ bool Player::BuyItemFromVendorSlot(ObjectGuid vendorGuid, uint32 vendorslot, uin
     VendorItemData const* tItems = pCreature->GetVendorTemplateItems();
     if ((!vItems || vItems->Empty()) && (!tItems || tItems->Empty()))
     {
-        SendBuyError( BUY_ERR_CANT_FIND_ITEM, pCreature, item, 0);
+        SendBuyError(BUY_ERR_CANT_FIND_ITEM, pCreature, item, 0);
         return false;
     }
 
@@ -18868,14 +18987,14 @@ bool Player::BuyItemFromVendorSlot(ObjectGuid vendorGuid, uint32 vendorslot, uin
 
     if (vendorslot >= vCount+tCount)
     {
-        SendBuyError( BUY_ERR_CANT_FIND_ITEM, pCreature, item, 0);
+        SendBuyError(BUY_ERR_CANT_FIND_ITEM, pCreature, item, 0);
         return false;
     }
 
     VendorItem const* crItem = vendorslot < vCount ? vItems->GetItem(vendorslot) : tItems->GetItem(vendorslot - vCount);
     if (!crItem)                                            // store diff item (cheating)
     {
-        SendBuyError( BUY_ERR_CANT_FIND_ITEM, pCreature, item, 0);
+        SendBuyError(BUY_ERR_CANT_FIND_ITEM, pCreature, item, 0);
         return false;
     }
 
@@ -18887,28 +19006,30 @@ bool Player::BuyItemFromVendorSlot(ObjectGuid vendorGuid, uint32 vendorslot, uin
         ItemPrototype const* crProto = ObjectMgr::GetItemPrototype(crItem->item);
         if (crProto->Flags & ITEM_FLAG_BOA && crProto->RequiredReputationFaction &&
             uint32(GetReputationRank(crProto->RequiredReputationFaction)) >= crProto->RequiredReputationRank)
-            converted = item == sObjectMgr.GetItemConvert(crItem->item, getRaceMask());;
+            converted = item == sObjectMgr.GetItemConvert(crItem->item, getRaceMask());
 
-        if(!converted)
+        if (!converted)
         {
             SendBuyError(BUY_ERR_CANT_FIND_ITEM, pCreature, item, 0);
             return false;
         }
     }
 
+    uint32 totalCount = pProto->BuyCount * count;
+
     // check current item amount if it limited
     if (crItem->maxcount != 0)
     {
-        if (pCreature->GetVendorItemCurrentCount(crItem) < pProto->BuyCount * count )
+        if (pCreature->GetVendorItemCurrentCount(crItem) < totalCount)
         {
-            SendBuyError( BUY_ERR_ITEM_ALREADY_SOLD, pCreature, item, 0);
+            SendBuyError(BUY_ERR_ITEM_ALREADY_SOLD, pCreature, item, 0);
             return false;
         }
     }
 
     if (uint32(GetReputationRank(pProto->RequiredReputationFaction)) < pProto->RequiredReputationRank)
     {
-        SendBuyError( BUY_ERR_REPUTATION_REQUIRE, pCreature, item, 0);
+        SendBuyError(BUY_ERR_REPUTATION_REQUIRE, pCreature, item, 0);
         return false;
     }
 
@@ -18936,9 +19057,9 @@ bool Player::BuyItemFromVendorSlot(ObjectGuid vendorGuid, uint32 vendorslot, uin
         }
 
         // item base price
-        for (uint8 i = 0; i < 5; ++i)
+        for (uint8 i = 0; i < MAX_EXTENDED_COST_ITEMS; ++i)
         {
-            if(iece->reqitem[i] && !HasItemCount(iece->reqitem[i], (iece->reqitemcount[i] * count)))
+            if (iece->reqitem[i] && !HasItemCount(iece->reqitem[i], iece->reqitemcount[i] * count))
             {
                 SendEquipError(EQUIP_ERR_VENDOR_MISSING_TURNINS, NULL, NULL);
                 return false;
@@ -18946,15 +19067,15 @@ bool Player::BuyItemFromVendorSlot(ObjectGuid vendorGuid, uint32 vendorslot, uin
         }
 
         // check for personal arena rating requirement
-        if( GetMaxPersonalArenaRatingRequirement(iece->reqarenaslot) < iece->reqpersonalarenarating )
+        if (GetMaxPersonalArenaRatingRequirement(iece->reqarenaslot) < iece->reqpersonalarenarating)
         {
             // probably not the proper equip err
-            SendEquipError(EQUIP_ERR_CANT_EQUIP_RANK,NULL,NULL);
+            SendEquipError(EQUIP_ERR_CANT_EQUIP_RANK, NULL, NULL);
             return false;
         }
     }
 
-    uint32 price  = (crItem->ExtendedCost == 0 || pProto->Flags2 & ITEM_FLAG2_EXT_COST_REQUIRES_GOLD) ? pProto->BuyPrice * count : 0;
+    uint32 price = (crItem->ExtendedCost == 0 || pProto->Flags2 & ITEM_FLAG2_EXT_COST_REQUIRES_GOLD) ? pProto->BuyPrice * count : 0;
 
     // reputation discount
     if (price)
@@ -18962,101 +19083,74 @@ bool Player::BuyItemFromVendorSlot(ObjectGuid vendorGuid, uint32 vendorslot, uin
 
     if (GetMoney() < price)
     {
-        SendBuyError( BUY_ERR_NOT_ENOUGHT_MONEY, pCreature, item, 0);
+        SendBuyError(BUY_ERR_NOT_ENOUGHT_MONEY, pCreature, item, 0);
         return false;
     }
+
+    Item* pItem = NULL;
 
     if ((bag == NULL_BAG && slot == NULL_SLOT) || IsInventoryPos(bag, slot))
     {
         ItemPosCountVec dest;
-        uint8 msg = CanStoreNewItem( bag, slot, dest, item, pProto->BuyCount * count );
+        uint8 msg = CanStoreNewItem(bag, slot, dest, item, totalCount);
         if (msg != EQUIP_ERR_OK)
         {
-            SendEquipError( msg, NULL, NULL, item );
+            SendEquipError(msg, NULL, NULL, item);
             return false;
         }
 
-        ModifyMoney( -(int32)price );
-        if (uint32 extendedCostId = crItem->ExtendedCost)
-        {
-            ItemExtendedCostEntry const* iece = sItemExtendedCostStore.LookupEntry(extendedCostId);
-            if (iece->reqhonorpoints)
-                ModifyHonorPoints( - int32(iece->reqhonorpoints * count));
-            if (iece->reqarenapoints)
-                ModifyArenaPoints( - int32(iece->reqarenapoints * count));
-            for (uint8 i = 0; i < 5; ++i)
-            {
-                if (iece->reqitem[i])
-                    DestroyItemCount(iece->reqitem[i], (iece->reqitemcount[i] * count), true);
-            }
-        }
+        ModifyMoney(-int32(price));
 
-        if (Item *it = StoreNewItem( dest, item, true ))
-        {
-            uint32 new_count = pCreature->UpdateVendorItemCurrentCount(crItem,pProto->BuyCount * count);
+        if (crItem->ExtendedCost)
+            TakeExtendedCost(crItem->ExtendedCost, count);
 
-            WorldPacket data(SMSG_BUY_ITEM, (8+4+4+4));
-            data << pCreature->GetObjectGuid();
-            data << uint32(vendorslot+1);                   // numbered from 1 at client
-            data << uint32(crItem->maxcount > 0 ? new_count : 0xFFFFFFFF);
-            data << uint32(count);
-            GetSession()->SendPacket(&data);
-
-            SendNewItem(it, pProto->BuyCount*count, true, false, false);
-        }
+        pItem = StoreNewItem(dest, item, true);
     }
     else if (IsEquipmentPos(bag, slot))
     {
-        if (pProto->BuyCount * count != 1)
+        if (totalCount != 1)
         {
-            SendEquipError( EQUIP_ERR_ITEM_CANT_BE_EQUIPPED, NULL, NULL );
+            SendEquipError(EQUIP_ERR_ITEM_CANT_BE_EQUIPPED, NULL, NULL);
             return false;
         }
 
         uint16 dest;
-        uint8 msg = CanEquipNewItem( slot, dest, item, false );
+        uint8 msg = CanEquipNewItem(slot, dest, item, false);
         if (msg != EQUIP_ERR_OK)
         {
-            SendEquipError( msg, NULL, NULL, item );
+            SendEquipError(msg, NULL, NULL, item);
             return false;
         }
 
-        ModifyMoney( -(int32)price );
-        if (uint32 extendedCostId = crItem->ExtendedCost)
-        {
-            ItemExtendedCostEntry const* iece = sItemExtendedCostStore.LookupEntry(extendedCostId);
-            if (iece->reqhonorpoints)
-                ModifyHonorPoints( - int32(iece->reqhonorpoints));
-            if (iece->reqarenapoints)
-                ModifyArenaPoints( - int32(iece->reqarenapoints));
-            for (uint8 i = 0; i < 5; ++i)
-            {
-                if(iece->reqitem[i])
-                    DestroyItemCount(iece->reqitem[i], iece->reqitemcount[i], true);
-            }
-        }
+        ModifyMoney(-int32(price));
 
-        if (Item *it = EquipNewItem( dest, item, true ))
-        {
-            uint32 new_count = pCreature->UpdateVendorItemCurrentCount(crItem,pProto->BuyCount * count);
+        if (crItem->ExtendedCost)
+            TakeExtendedCost(crItem->ExtendedCost, count);
 
-            WorldPacket data(SMSG_BUY_ITEM, (8+4+4+4));
-            data << pCreature->GetObjectGuid();
-            data << uint32(vendorslot + 1);                 // numbered from 1 at client
-            data << uint32(crItem->maxcount > 0 ? new_count : 0xFFFFFFFF);
-            data << uint32(count);
-            GetSession()->SendPacket(&data);
+        pItem = EquipNewItem(dest, item, true);
 
-            SendNewItem(it, pProto->BuyCount*count, true, false, false);
-
+        if (pItem)
             AutoUnequipOffhandIfNeed();
-        }
     }
     else
     {
-        SendEquipError( EQUIP_ERR_ITEM_DOESNT_GO_TO_SLOT, NULL, NULL );
+        SendEquipError(EQUIP_ERR_ITEM_DOESNT_GO_TO_SLOT, NULL, NULL);
         return false;
     }
+
+    if (!pItem)
+        return false;
+
+    uint32 new_count = pCreature->UpdateVendorItemCurrentCount(crItem, totalCount);
+
+    WorldPacket data(SMSG_BUY_ITEM, 8+4+4+4);
+    data << pCreature->GetObjectGuid();
+    data << uint32(vendorslot + 1);                 // numbered from 1 at client
+    data << uint32(crItem->maxcount > 0 ? new_count : 0xFFFFFFFF);
+    data << uint32(count);
+    GetSession()->SendPacket(&data);
+
+    SendNewItem(pItem, totalCount, true, false, false);
 
     return crItem->maxcount != 0;
 }
@@ -21278,7 +21372,7 @@ bool Player::isTotalImmune()
     return false;
 }
 
-bool Player::HasTitle(uint32 bitIndex)
+bool Player::HasTitle(uint32 bitIndex) const
 {
     if (bitIndex > MAX_TITLE_INDEX)
         return false;
@@ -21433,16 +21527,10 @@ void Player::AutoStoreLoot(Loot& loot, bool broadcast, uint8 bag, uint8 slot)
 
 uint32 Player::CalculateTalentsPoints() const
 {
-    uint32 base_talent = getLevel() < 10 ? 0 : getLevel()-9;
+    uint32 base_level = getClass() == CLASS_DEATH_KNIGHT ? 55 : 9;
+    uint32 base_talent = getLevel() <= base_level ? 0 : getLevel() - base_level;
 
-    if(getClass() != CLASS_DEATH_KNIGHT)
-        return uint32(base_talent * sWorld.getConfig(CONFIG_FLOAT_RATE_TALENT));
-
-    uint32 talentPointsForLevel = getLevel() < 56 ? 0 : getLevel() - 55;
-    talentPointsForLevel += m_questRewardTalentCount;
-
-    if(talentPointsForLevel > base_talent)
-        talentPointsForLevel = base_talent;
+    uint32 talentPointsForLevel = base_talent + m_questRewardTalentCount;
 
     return uint32(talentPointsForLevel * sWorld.getConfig(CONFIG_FLOAT_RATE_TALENT));
 }

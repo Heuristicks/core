@@ -1072,14 +1072,16 @@ struct ItemDisplayInfoEntry
 //    uint32      arenaseason;                              // arena season number(1-4)
 //};
 
+#define MAX_EXTENDED_COST_ITEMS 5
+
 struct ItemExtendedCostEntry
 {
     uint32      ID;                                         // 0 extended-cost entry id
     uint32      reqhonorpoints;                             // 1 required honor points
     uint32      reqarenapoints;                             // 2 required arena points
-    uint32      reqarenaslot;                               // 4 arena slot restrctions (min slot value)
-    uint32      reqitem[5];                                 // 5-8 required item id
-    uint32      reqitemcount[5];                            // 9-13 required count of 1st item
+    uint32      reqarenaslot;                               // 4 arena slot restrictions (min slot value)
+    uint32      reqitem[MAX_EXTENDED_COST_ITEMS];           // 5-8 required item id
+    uint32      reqitemcount[MAX_EXTENDED_COST_ITEMS];      // 9-13 required count of 1st item
     uint32      reqpersonalarenarating;                     // 14 required personal arena rating
 };
 
@@ -1434,9 +1436,9 @@ struct SpellEntry
     uint32    AttributesEx6;                                // 10       m_attributesExF
     uint32    AttributesEx7;                                // 11       m_attributesExG (0x20 - totems, 0x4 - paladin auras, etc...)
     uint32    Stances;                                      // 12       m_shapeshiftMask
-    // uint32 unk_320_2;                                    // 13       3.2.0
+    // uint32 unk_320_1;                                    // 13       3.2.0
     uint32    StancesNot;                                   // 14       m_shapeshiftExclude
-    // uint32 unk_320_3;                                    // 15       3.2.0
+    // uint32 unk_320_2;                                    // 15       3.2.0
     uint32    Targets;                                      // 16       m_targets
     uint32    TargetCreatureType;                           // 17       m_targetCreatureType
     uint32    RequiresSpellFocus;                           // 18       m_requiresSpellFocus
@@ -1530,7 +1532,7 @@ struct SpellEntry
     uint32    runeCostID;                                   // 226      m_runeCostID
     //uint32    spellMissileID;                             // 227      m_spellMissileID not used
     //uint32  PowerDisplayId;                               // 228      m_powerDisplayID - id from PowerDisplay.dbc, new in 3.1
-    //float   unk_320_4[3];                                 // 229-231  3.2.0
+    //float   unk_320_3[3];                                 // 229-231  3.2.0
     //uint32  spellDescriptionVariableID;                   // 232      m_spellDescriptionVariableID, 3.2.0
     uint32  SpellDifficultyId;                              // 233      m_spellDifficultyID - id from SpellDifficulty.dbc
 

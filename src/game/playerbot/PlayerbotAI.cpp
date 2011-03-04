@@ -3,6 +3,9 @@
 #include "../ItemPrototype.h"
 #include "../World.h"
 #include "../SpellMgr.h"
+#include "../GridNotifiers.h"
+#include "../GridNotifiersImpl.h"
+#include "../CellImpl.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotMgr.h"
 #include "PlayerbotDeathKnightAI.h"
@@ -40,8 +43,8 @@ class PlayerbotChatHandler : protected ChatHandler
 {
 public:
     explicit PlayerbotChatHandler(Player* pMasterPlayer) : ChatHandler(pMasterPlayer) {}
-    bool revive(Player& botPlayer) { return HandleReviveCommand((char*) botPlayer.GetName()); }
-    bool teleport(Player& botPlayer) { return HandleNamegoCommand((char*) botPlayer.GetName()); }
+    bool revive(Player& botPlayer) { return HandleReviveCommand((char *) botPlayer.GetName()); }
+    bool teleport(Player& botPlayer) { return HandleNamegoCommand((char *) botPlayer.GetName()); }
     void sysmessage(const char *str) { SendSysMessage(str); }
     bool dropQuest(char *str) { return HandleQuestRemoveCommand(str); }
 };
@@ -64,6 +67,7 @@ PlayerbotAI::PlayerbotAI(PlayerbotMgr* const mgr, Player* const bot) :
     m_targetCombat = 0;
     m_targetAssist = 0;
     m_targetProtect = 0;
+    m_collectionFlags = 0x07;   // default to collect after combat for quest and profession
 
     // start following master (will also teleport bot to master)
     SetMovementOrder(MOVEMENT_FOLLOW, GetMaster());
@@ -73,45 +77,49 @@ PlayerbotAI::PlayerbotAI(PlayerbotMgr* const mgr, Player* const bot) :
     {
         case CLASS_PRIEST:
             m_combatStyle = COMBAT_RANGED;
-            m_classAI = (PlayerbotClassAI*) new PlayerbotPriestAI(GetMaster(), m_bot, this);
+            m_classAI = (PlayerbotClassAI *) new PlayerbotPriestAI(GetMaster(), m_bot, this);
             break;
         case CLASS_MAGE:
             m_combatStyle = COMBAT_RANGED;
-            m_classAI = (PlayerbotClassAI*) new PlayerbotMageAI(GetMaster(), m_bot, this);
+            m_classAI = (PlayerbotClassAI *) new PlayerbotMageAI(GetMaster(), m_bot, this);
             break;
         case CLASS_WARLOCK:
             m_combatStyle = COMBAT_RANGED;
-            m_classAI = (PlayerbotClassAI*) new PlayerbotWarlockAI(GetMaster(), m_bot, this);
+            m_classAI = (PlayerbotClassAI *) new PlayerbotWarlockAI(GetMaster(), m_bot, this);
             break;
         case CLASS_WARRIOR:
             m_combatStyle = COMBAT_MELEE;
-            m_classAI = (PlayerbotClassAI*) new PlayerbotWarriorAI(GetMaster(), m_bot, this);
+            m_classAI = (PlayerbotClassAI *) new PlayerbotWarriorAI(GetMaster(), m_bot, this);
             break;
         case CLASS_SHAMAN:
             m_combatStyle = COMBAT_MELEE;
-            m_classAI = (PlayerbotClassAI*) new PlayerbotShamanAI(GetMaster(), m_bot, this);
+            m_classAI = (PlayerbotClassAI *) new PlayerbotShamanAI(GetMaster(), m_bot, this);
             break;
         case CLASS_PALADIN:
             m_combatStyle = COMBAT_MELEE;
-            m_classAI = (PlayerbotClassAI*) new PlayerbotPaladinAI(GetMaster(), m_bot, this);
+            m_classAI = (PlayerbotClassAI *) new PlayerbotPaladinAI(GetMaster(), m_bot, this);
             break;
         case CLASS_ROGUE:
             m_combatStyle = COMBAT_MELEE;
-            m_classAI = (PlayerbotClassAI*) new PlayerbotRogueAI(GetMaster(), m_bot, this);
+            m_classAI = (PlayerbotClassAI *) new PlayerbotRogueAI(GetMaster(), m_bot, this);
             break;
         case CLASS_DRUID:
             m_combatStyle = COMBAT_MELEE;
-            m_classAI = (PlayerbotClassAI*) new PlayerbotDruidAI(GetMaster(), m_bot, this);
+            m_classAI = (PlayerbotClassAI *) new PlayerbotDruidAI(GetMaster(), m_bot, this);
             break;
         case CLASS_HUNTER:
             m_combatStyle = COMBAT_RANGED;
-            m_classAI = (PlayerbotClassAI*) new PlayerbotHunterAI(GetMaster(), m_bot, this);
+            m_classAI = (PlayerbotClassAI *) new PlayerbotHunterAI(GetMaster(), m_bot, this);
             break;
         case CLASS_DEATH_KNIGHT:
             m_combatStyle = COMBAT_MELEE;
-            m_classAI = (PlayerbotClassAI*) new PlayerbotDeathKnightAI(GetMaster(), m_bot, this);
+            m_classAI = (PlayerbotClassAI *) new PlayerbotDeathKnightAI(GetMaster(), m_bot, this);
             break;
     }
+
+    HERB_GATHERING      = initSpell(HERB_GATHERING_1);
+    MINING              = initSpell(MINING_1);
+    SKINNING            = initSpell(SKINNING_1);
 }
 
 PlayerbotAI::~PlayerbotAI()
@@ -288,7 +296,7 @@ uint32 PlayerbotAI::initSpell(uint32 spellId)
         SpellRangeEntry const* srange = sSpellRangeStore.LookupEntry(pSpellInfo->rangeIndex);
         float range = GetSpellMaxRange(srange, IsPositiveSpell(spellId));
         m_bot->ApplySpellMod(spellId, SPELLMOD_RANGE, range, spell);
-        m_spellRangeMap.insert(std::pair<uint32,float>(spellId, range));
+        m_spellRangeMap.insert(std::pair<uint32, float>(spellId, range));
         delete spell;
     }
     return (next == 0) ? spellId : next;
@@ -370,7 +378,7 @@ void PlayerbotAI::SendNotEquipList(Player& player)
     // list out items in other removable backpacks
     for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
     {
-        const Bag* const pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+        const Bag* const pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
         if (pBag)
             for (uint8 slot = 0; slot < pBag->GetBagSize(); ++slot)
             {
@@ -547,8 +555,43 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
 
         case SMSG_INVENTORY_CHANGE_FAILURE:
         {
-            TellMaster("I can't use that.");
-            return;
+            WorldPacket p(packet);
+            uint8 err;
+            p >> err;
+            if (err != EQUIP_ERR_OK)
+            {
+                switch (err)
+                {
+                    case EQUIP_ERR_CANT_CARRY_MORE_OF_THIS:
+                        TellMaster("I can't carry anymore of those.");
+                        return;
+                    case EQUIP_ERR_MISSING_REAGENT:
+                        TellMaster("I'm missing some reagents for that.");
+                        return;
+                    case EQUIP_ERR_ITEM_LOCKED:
+                        TellMaster("That item is locked.");
+                        return;
+                    case EQUIP_ERR_ALREADY_LOOTED:
+                        TellMaster("That is already looted.");
+                        return;
+                    case EQUIP_ERR_INVENTORY_FULL:
+                        TellMaster("My inventory is full.");
+                        return;
+                    case EQUIP_ERR_NOT_IN_COMBAT:
+                        TellMaster("I can't use that in combat.");
+                        return;
+                    case EQUIP_ERR_LOOT_CANT_LOOT_THAT_NOW:
+                        TellMaster("I can't get that now.");
+                        return;
+                    case EQUIP_ERR_ITEM_UNIQUE_EQUIPABLE:
+                        TellMaster("I can only have one of those equipped.");
+                        return;
+                    default:
+                        TellMaster("I can't use that.");
+                        sLog.outDebug("[PlayerbotAI]: SMSG_INVENTORY_CHANGE_FAILURE: %u", err);
+                        return;
+                }
+            }
         }
         case SMSG_SPELL_FAILURE:
         {
@@ -782,7 +825,7 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
                 // list out items in other removable backpacks
                 for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
                 {
-                    const Bag* const pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+                    const Bag* const pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
                     if (pBag)
                         for (uint8 slot = 0; slot < pBag->GetBagSize(); ++slot)
                         {
@@ -822,6 +865,35 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
                 ChatHandler ch(m_bot->GetTrader());
                 ch.SendSysMessage(out.str().c_str());
             }
+            return;
+        }
+
+        case SMSG_SPELL_START:
+        {
+            WorldPacket p(packet);
+            uint64 castItemGuid = p.readPackGUID();
+            uint64 casterGuid = p.readPackGUID();
+            if (casterGuid != m_bot->GetGUID())
+                return;
+
+            uint8 castCount;
+            p >> castCount;
+            uint32 spellId;
+            p >> spellId;
+            uint32 castFlags;
+            p >> castFlags;
+            uint32 msTime;
+            p >> msTime;
+
+            const SpellEntry* const pSpellInfo = sSpellStore.LookupEntry(spellId);
+            if (!pSpellInfo)
+                return;
+
+            if (pSpellInfo->AuraInterruptFlags & AURA_INTERRUPT_FLAG_NOT_SEATED)
+                return;
+
+            m_ignoreAIUpdatesUntilTime = time(0) + (msTime / 1000) + 1;
+
             return;
         }
 
@@ -870,7 +942,7 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
                 ObjectGuid guid;
                 p >> guid;
 
-                WorldPacket* const packet = new WorldPacket(CMSG_RESURRECT_RESPONSE, 8+1);
+                WorldPacket* const packet = new WorldPacket(CMSG_RESURRECT_RESPONSE, 8 + 1);
                 *packet << guid;
                 *packet << uint8(1);                        // accept
                 m_bot->GetSession()->QueuePacket(packet);   // queue the packet to get around race condition
@@ -879,6 +951,242 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
                 SetState(BOTSTATE_NORMAL);
                 SetIgnoreUpdateTime(0);
             }
+            return;
+        }
+
+        case SMSG_LOOT_RESPONSE:
+        {
+            WorldPacket p(packet);
+            ObjectGuid guid;
+            uint8 loot_type;
+            uint32 gold;
+            uint8 items;
+
+            p >> guid;
+            p >> loot_type;
+            p >> gold;
+            p >> items;
+
+            if (gold > 0)
+            {
+                WorldPacket* const packet = new WorldPacket(CMSG_LOOT_MONEY, 0);
+                m_bot->GetSession()->QueuePacket(packet);
+            }
+
+            if (loot_type == LOOT_SKINNING || HasCollectFlag(COLLECT_FLAG_LOOT))
+                for (uint8 i = 0; i < items; ++i)
+                {
+                    // just auto loot everything for getting object
+                    WorldPacket* const packet = new WorldPacket(CMSG_AUTOSTORE_LOOT_ITEM, 1);
+                    *packet << i;
+                    m_bot->GetSession()->QueuePacket(packet);
+                }
+            else if (loot_type == LOOT_CORPSE)  // loot from a creature
+
+                for (uint8 i = 0; i < items; ++i)
+                {
+                    // look for through items on corpse and loot them
+                    uint32 itemid;
+                    uint32 itemcount;
+                    uint8 lootslot_type;
+                    uint8 itemindex;
+                    bool grab = false;
+
+                    p >> itemindex;
+                    p >> itemid;
+                    p >> itemcount;
+                    p.read_skip<uint32>();  // display id
+                    p.read_skip<uint32>();  // randomSuffix
+                    p.read_skip<uint32>();  // randomPropertyId
+                    p >> lootslot_type;     // 0 = can get, 1 = look only, 2 = master get
+
+                    if (lootslot_type != 0)
+                        continue;
+
+                    ItemPrototype const *pProto = ObjectMgr::GetItemPrototype(itemid);
+                    if (!pProto)
+                        continue;
+
+                    uint32 max = pProto->MaxCount;
+                    // do we already have the max allowed of item if more than zero?
+                    if (max > 0 && m_bot->HasItemCount(itemid, max, true))
+                        continue;
+
+                    // grab quest related items
+                    if (pProto->StartQuest > 0 && HasCollectFlag(COLLECT_FLAG_QUEST))
+                        grab = true;
+
+                    if (m_needItemList[itemid] > 0)
+                        grab = true;    // item is in need list, just grab without further processing
+                    else    // if not in need list, run other checks
+                    {
+                        switch (pProto->Class)
+                        {
+                            case ITEM_CLASS_QUEST:
+                                if (!HasCollectFlag(COLLECT_FLAG_QUEST) && !HasCollectFlag(COLLECT_FLAG_LOOT))
+                                    break;
+                            case ITEM_CLASS_KEY:
+                                grab = true;
+                                break;
+                            case ITEM_CLASS_TRADE_GOODS:
+                                if (!HasCollectFlag(COLLECT_FLAG_PROFESSION) && !HasCollectFlag(COLLECT_FLAG_LOOT))
+                                    break;
+
+                                switch (pProto->SubClass)
+                                {
+                                    case ITEM_SUBCLASS_PARTS:
+                                    case ITEM_SUBCLASS_EXPLOSIVES:
+                                    case ITEM_SUBCLASS_DEVICES:
+                                        grab = m_bot->HasSkill(SKILL_ENGINEERING);
+                                        break;
+                                    case ITEM_SUBCLASS_JEWELCRAFTING:
+                                        grab = m_bot->HasSkill(SKILL_JEWELCRAFTING);
+                                        break;
+                                    case ITEM_SUBCLASS_CLOTH:
+                                        grab = m_bot->HasSkill(SKILL_TAILORING);
+                                        break;
+                                    case ITEM_SUBCLASS_LEATHER:
+                                        grab = m_bot->HasSkill(SKILL_LEATHERWORKING);
+                                        break;
+                                    case ITEM_SUBCLASS_METAL_STONE:
+                                        grab = (m_bot->HasSkill(SKILL_BLACKSMITHING) ||
+                                                m_bot->HasSkill(SKILL_ENGINEERING) ||
+                                                m_bot->HasSkill(SKILL_MINING));
+                                        break;
+                                    case ITEM_SUBCLASS_MEAT:
+                                        grab = m_bot->HasSkill(SKILL_COOKING);
+                                        break;
+                                    case ITEM_SUBCLASS_HERB:
+                                        grab = (m_bot->HasSkill(SKILL_HERBALISM) ||
+                                                m_bot->HasSkill(SKILL_ALCHEMY) ||
+                                                m_bot->HasSkill(SKILL_INSCRIPTION));
+                                        break;
+                                    case ITEM_SUBCLASS_ELEMENTAL:
+                                        grab = true;    // pretty much every profession uses these a bit
+                                        break;
+                                    case ITEM_SUBCLASS_ENCHANTING:
+                                        grab = m_bot->HasSkill(SKILL_ENCHANTING);
+                                        break;
+                                    default:
+                                        break;
+                                }
+                                break;
+                            case ITEM_CLASS_RECIPE:
+                            {
+                                if (!HasCollectFlag(COLLECT_FLAG_PROFESSION) && !HasCollectFlag(COLLECT_FLAG_LOOT))
+                                    break;
+
+                                // skip recipes that we have
+                                if (m_bot->HasSpell(pProto->Spells[2].SpellId))
+                                    break;
+
+                                switch (pProto->SubClass)
+                                {
+                                    case ITEM_SUBCLASS_LEATHERWORKING_PATTERN:
+                                        grab = m_bot->HasSkill(SKILL_LEATHERWORKING);
+                                        break;
+                                    case ITEM_SUBCLASS_TAILORING_PATTERN:
+                                        grab = m_bot->HasSkill(SKILL_TAILORING);
+                                        break;
+                                    case ITEM_SUBCLASS_ENGINEERING_SCHEMATIC:
+                                        grab = m_bot->HasSkill(SKILL_ENGINEERING);
+                                        break;
+                                    case ITEM_SUBCLASS_BLACKSMITHING:
+                                        grab = m_bot->HasSkill(SKILL_BLACKSMITHING);
+                                        break;
+                                    case ITEM_SUBCLASS_COOKING_RECIPE:
+                                        grab = m_bot->HasSkill(SKILL_COOKING);
+                                        break;
+                                    case ITEM_SUBCLASS_ALCHEMY_RECIPE:
+                                        grab = m_bot->HasSkill(SKILL_ALCHEMY);
+                                        break;
+                                    case ITEM_SUBCLASS_FIRST_AID_MANUAL:
+                                        grab = m_bot->HasSkill(SKILL_FIRST_AID);
+                                        break;
+                                    case ITEM_SUBCLASS_ENCHANTING_FORMULA:
+                                        grab = m_bot->HasSkill(SKILL_ENCHANTING);
+                                        break;
+                                    case ITEM_SUBCLASS_FISHING_MANUAL:
+                                        grab = m_bot->HasSkill(SKILL_FISHING);
+                                        break;
+                                    case ITEM_SUBCLASS_JEWELCRAFTING_RECIPE:
+                                        grab = m_bot->HasSkill(SKILL_JEWELCRAFTING);
+                                        break;
+                                    default:
+                                        break;
+                                }
+                            }
+                            default:
+                                break;
+                        }
+                    }
+
+                    // TODO: check for items that the bot has been told to collect
+
+                    if (grab)
+                    {
+                        sLog.outDebug("[PlayerbotAI]: Loot item index %u item id %u", itemindex, itemid);
+                        WorldPacket* const packet = new WorldPacket(CMSG_AUTOSTORE_LOOT_ITEM, 1);
+                        *packet << itemindex;
+                        m_bot->GetSession()->QueuePacket(packet);
+                    }
+                }
+
+            // release loot
+            WorldPacket* const packet = new WorldPacket(CMSG_LOOT_RELEASE, 8);
+            *packet << guid;
+            m_bot->GetSession()->QueuePacket(packet);
+
+            SetQuestNeedItems();
+
+            return;
+        }
+
+        case SMSG_LOOT_RELEASE_RESPONSE:
+        {
+            WorldPacket p(packet);
+            ObjectGuid guid;
+
+            p >> guid;
+
+            if (guid == m_lootCurrent)
+            {
+                Creature *c = m_bot->GetMap()->GetCreature(m_lootCurrent);
+
+                if (c && c->GetCreatureInfo()->SkinLootId && !c->lootForSkin)
+                {
+                    uint32 reqSkill = c->GetCreatureInfo()->GetRequiredLootSkill();
+                    // check if it is a leather skin and if it is to be collected (could be ore or herb)
+                    if (m_bot->HasSkill(reqSkill) && ((reqSkill != SKILL_SKINNING) ||
+                                                      (HasCollectFlag(COLLECT_FLAG_SKIN) && reqSkill == SKILL_SKINNING)))
+                    {
+                        // calculate skill requirement
+                        uint32 skillValue = m_bot->GetPureSkillValue(reqSkill);
+                        uint32 targetLevel = c->getLevel();
+                        uint32 reqSkillValue = targetLevel < 10 ? 0 : targetLevel < 20 ? (targetLevel - 10) * 10 : targetLevel * 5;
+                        if (skillValue >= reqSkillValue)
+                        {
+                            if (m_lootCurrent != m_lootPrev)    // if this wasn't previous loot try again
+                            {
+                                m_lootPrev = m_lootCurrent;
+                                return; // so that the DoLoot function is called again to get skin
+                            }
+                        }
+                        else
+                            TellMaster("My skill is %u but it requires %u", skillValue, reqSkillValue);
+                    }
+                }
+
+                // if previous is current, clear
+                if (m_lootPrev == m_lootCurrent)
+                    m_lootPrev = ObjectGuid();
+                // clear current target
+                m_lootCurrent = ObjectGuid();
+                // clear movement
+                m_bot->GetMotionMaster()->Clear();
+                m_bot->GetMotionMaster()->MoveIdle();
+            }
+
             return;
         }
 
@@ -1032,7 +1340,7 @@ Item* PlayerbotAI::FindMount(uint32 matchingRidingSkill) const
     // list out items in other removable backpacks
     for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
     {
-        const Bag* const pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+        const Bag* const pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
         if (pBag)
             for (uint8 slot = 0; slot < pBag->GetBagSize(); ++slot)
             {
@@ -1077,7 +1385,7 @@ Item* PlayerbotAI::FindFood() const
     // list out items in other removable backpacks
     for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
     {
-        const Bag* const pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+        const Bag* const pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
         if (pBag)
             for (uint8 slot = 0; slot < pBag->GetBagSize(); ++slot)
             {
@@ -1130,7 +1438,7 @@ Item* PlayerbotAI::FindDrink() const
     // list out items in other removable backpacks
     for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
     {
-        const Bag* const pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+        const Bag* const pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
         if (pBag)
             for (uint8 slot = 0; slot < pBag->GetBagSize(); ++slot)
             {
@@ -1175,7 +1483,7 @@ Item* PlayerbotAI::FindBandage() const
     // list out items in other removable backpacks
     for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
     {
-        const Bag* const pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+        const Bag* const pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
         if (pBag)
             for (uint8 slot = 0; slot < pBag->GetBagSize(); ++slot)
             {
@@ -1215,7 +1523,7 @@ Item* PlayerbotAI::FindPoison() const
     // list out items in other removable backpacks
     for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
     {
-        const Bag* const pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+        const Bag* const pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
         if (pBag)
             for (uint8 slot = 0; slot < pBag->GetBagSize(); ++slot)
             {
@@ -1255,7 +1563,7 @@ Item* PlayerbotAI::FindConsumable(uint32 displayId) const
     // list out items in other removable backpacks
     for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
     {
-        const Bag* const pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+        const Bag* const pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
         if (pBag)
             for (uint8 slot = 0; slot < pBag->GetBagSize(); ++slot)
             {
@@ -1344,8 +1652,7 @@ void PlayerbotAI::GetCombatTarget(Unit* forcedTarget)
     {
         SetState(BOTSTATE_COMBAT);
         SetQuestNeedItems();
-        m_lootCreature.clear();
-        m_lootCurrent = 0;
+        m_lootCurrent = ObjectGuid();
         m_targetCombat = 0;
     }
 
@@ -1423,7 +1730,7 @@ void PlayerbotAI::GetCombatTarget(Unit* forcedTarget)
     m_bot->Attack(m_targetCombat, true);
 
     // add thingToAttack to loot list
-    m_lootCreature.push_back(m_targetCombat->GetGUID());
+    m_lootTargets.push_back(m_targetCombat->GetGUID());
 
     return;
 }
@@ -1469,6 +1776,14 @@ void PlayerbotAI::DoCombatMovement()
 
     float targetDist = m_bot->GetDistance(m_targetCombat);
 
+    // if m_bot has it's back to the attacker, turn
+    if(!m_bot->HasInArc(M_PI_F,m_targetCombat))
+    {
+        // TellMaster("%s is facing the wrong way!", m_bot->GetName());
+        m_bot->GetMotionMaster()->Clear(true);
+        m_bot->SetOrientation(m_bot->GetAngle(m_targetCombat));
+    }
+
     if (m_combatStyle == COMBAT_MELEE && !m_bot->hasUnitState(UNIT_STAT_CHASE) && ((m_movementOrder == MOVEMENT_STAY && targetDist <= ATTACK_DISTANCE) || (m_movementOrder != MOVEMENT_STAY)))
         // melee combat - chase target if in range or if we are not forced to stay
         m_bot->GetMotionMaster()->MoveChase(m_targetCombat);
@@ -1487,8 +1802,6 @@ void PlayerbotAI::SetQuestNeedItems()
 {
     // reset values first
     m_needItemList.clear();
-    m_lootCreature.clear();
-    m_lootCurrent = 0;
 
     // run through accepted quests, get quest infoand data
     for (QuestStatusMap::iterator iter = m_bot->getQuestStatusMap().begin(); iter != m_bot->getQuestStatusMap().end(); ++iter)
@@ -1514,7 +1827,7 @@ void PlayerbotAI::SetQuestNeedItems()
 
 void PlayerbotAI::SetState(BotState state)
 {
-    //sLog.outDebug( "[PlayerbotAI]: %s switch state %d to %d", m_bot->GetName(), m_botState, state );
+    // sLog.outDebug( "[PlayerbotAI]: %s switch state %d to %d", m_bot->GetName(), m_botState, state );
     m_botState = state;
 }
 
@@ -1529,7 +1842,7 @@ uint8 PlayerbotAI::GetFreeBagSpace() const
     }
     for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
     {
-        Bag* pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i);
+        Bag* pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i);
         if (pBag && pBag->GetProto()->BagFamily == BAG_FAMILY_MASK_NONE)
             space += pBag->GetFreeSlots();
     }
@@ -1538,105 +1851,270 @@ uint8 PlayerbotAI::GetFreeBagSpace() const
 
 void PlayerbotAI::DoLoot()
 {
-    if (!m_lootCurrent && m_lootCreature.empty())
+    bool looted = false;
+
+    if (m_lootCurrent.IsEmpty() && m_lootTargets.empty())
     {
-        //sLog.outDebug( "[PlayerbotAI]: %s reset loot list / go back to idle", m_bot->GetName() );
-        m_botState = BOTSTATE_NORMAL;
+        // sLog.outDebug( "[PlayerbotAI]: %s reset loot list / go back to idle", m_bot->GetName() );
+        SetState(BOTSTATE_NORMAL);
+        m_bot->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING);
         SetQuestNeedItems();
         return;
     }
 
-    if (!m_lootCurrent)
+    if (m_lootCurrent.IsEmpty())
     {
-        m_lootCurrent = m_lootCreature.front();
-        m_lootCreature.pop_front();
+        m_lootCurrent = m_lootTargets.front();
+        m_lootTargets.pop_front();
+
+        GameObject *go = m_bot->GetMap()->GetGameObject(m_lootCurrent);
         Creature *c = m_bot->GetMap()->GetCreature(m_lootCurrent);
+
         // check if we got a creature and if it is still a corpse, otherwise bot runs to spawn point
         if (!c || c->getDeathState() != CORPSE || GetMaster()->GetDistance(c) > BOTLOOT_DISTANCE)
+            if (!go)
+            {
+                m_lootCurrent = ObjectGuid();
+                return;
+            }
+
+        if (c)
         {
-            m_lootCurrent = 0;
-            return;
+            if (m_collectionFlags == COLLECT_FLAG_NOTHING)
+            {
+                m_lootCurrent = ObjectGuid();   // told to loot nothing
+                return;
+            }
+            m_bot->GetMotionMaster()->MovePoint(c->GetMapId(), c->GetPositionX(), c->GetPositionY(), c->GetPositionZ());
+            //sLog.outDebug( "[PlayerbotAI]: %s is going to loot '%s' deathState=%d", m_bot->GetName(), c->GetName(), c->getDeathState() );
         }
-        m_bot->GetMotionMaster()->MovePoint(c->GetMapId(), c->GetPositionX(), c->GetPositionY(), c->GetPositionZ());
-        //sLog.outDebug( "[PlayerbotAI]: %s is going to loot '%s' deathState=%d", m_bot->GetName(), c->GetName(), c->getDeathState() );
+
+        if (go)
+            m_bot->GetMotionMaster()->MovePoint(go->GetMapId(), go->GetPositionX(), go->GetPositionY(), go->GetPositionZ());
+            //sLog.outDebug( "[PlayerbotAI]: %s is going to loot '%s'", m_bot->GetName(), go->GetGOInfo()->name);
+
+        // TEMP HACK: attempt to fix duplicate loot attempt (shows when getting ores occasionally)
+        // give time to move to point before trying again
+        m_ignoreAIUpdatesUntilTime = time(0) + 1;
     }
     else
     {
-        Creature *c = m_bot->GetMap()->GetCreature(m_lootCurrent);
-        if (!c || c->getDeathState() != CORPSE || GetMaster()->GetDistance(c) > BOTLOOT_DISTANCE)
-        {
-            m_lootCurrent = 0;
-            return;
-        }
-        if (m_bot->IsWithinDistInMap(c, INTERACTION_DISTANCE))
-        {
-            // check for needed items
-            m_bot->SendLoot(m_lootCurrent, LOOT_CORPSE);
-            Loot *loot = &c->loot;
-            uint32 lootNum = loot->GetMaxSlotInLootFor(m_bot);
-            //sLog.outDebug( "[PlayerbotAI]: %s looting: '%s' got %d items", m_bot->GetName(), c->GetName(), loot->GetMaxSlotInLootFor( m_bot ) );
-            for (uint32 l = 0; l < lootNum; l++)
-            {
-                QuestItem *qitem = 0, *ffaitem = 0, *conditem = 0;
-                LootItem *item = loot->LootItemInSlot(l, m_bot, &qitem, &ffaitem, &conditem);
-                if (!item)
-                    continue;
+        uint32 skillId = 0;
+        uint32 reqSkillValue = 0;
+        uint32 SkillValue = 0;
+        bool keyFailed = false;
+        bool skillFailed = false;
+        bool forceFailed = false;
 
-                if (!qitem && item->is_blocked)
+        Creature *c = m_bot->GetMap()->GetCreature(m_lootCurrent);
+        GameObject *go = m_bot->GetMap()->GetGameObject(m_lootCurrent);
+        if (!c || c->getDeathState() != CORPSE || GetMaster()->GetDistance(c) > BOTLOOT_DISTANCE)
+            if (!go)
+            {
+                m_lootCurrent = ObjectGuid();
+                return;
+            }
+        if (m_bot->IsWithinDistInMap(c, INTERACTION_DISTANCE) || m_bot->IsWithinDistInMap(go, INTERACTION_DISTANCE))
+        {
+            if (c)  // creature
+            {
+                if (c->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE))
                 {
-                    m_bot->SendLootRelease(m_bot->GetLootGUID());
-                    continue;
+                    // loot the creature
+                    WorldPacket* const packet = new WorldPacket(CMSG_LOOT, 8);
+                    *packet << m_lootCurrent;
+                    m_bot->GetSession()->QueuePacket(packet);
+                    return; // no further processing is needed
+                    // m_lootCurrent is reset in SMSG_LOOT_RELEASE_RESPONSE after checking for skinloot
+                }
+                else if (c->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE))
+                {
+                    skillId = c->GetCreatureInfo()->GetRequiredLootSkill();
+                    // not all creature skins are leather, some are ore or herb
+                    if (m_bot->HasSkill(skillId) && ((skillId != SKILL_SKINNING) ||
+                                                     (HasCollectFlag(COLLECT_FLAG_SKIN) && skillId == SKILL_SKINNING)))
+                    {
+                        // calculate skinning skill requirement
+                        uint32 targetLevel = c->getLevel();
+                        reqSkillValue = targetLevel < 10 ? 0 : targetLevel < 20 ? (targetLevel - 10) * 10 : targetLevel * 5;
+                    }
+                }
+                else    // not a lootable creature, clear it
+                {
+                    m_lootCurrent = ObjectGuid();
+                    // clear movement target, take next target on next update
+                    m_bot->GetMotionMaster()->Clear();
+                    m_bot->GetMotionMaster()->MoveIdle();
+                    return;
                 }
 
-                if (m_needItemList[item->itemid] > 0)
-                {
-                    //sLog.outDebug( "[PlayerbotAI]: %s looting: needed item '%s'", m_bot->GetName(), sObjectMgr.GetItemLocale(item->itemid)->Name );
-                    ItemPosCountVec dest;
-                    if (m_bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item->itemid, item->count) == EQUIP_ERR_OK)
-                    {
-                        Item * newitem = m_bot->StoreNewItem(dest, item->itemid, true, item->randomPropertyId);
+                // creatures cannot be unlocked or forced open
+                keyFailed = true;
+                forceFailed = true;
+            }
 
-                        if (qitem)
+            if (go) // object
+            {
+                uint32 reqItem = 0;
+
+                // check skill or lock on object
+                uint32 lockId = go->GetGOInfo()->GetLockId();
+                LockEntry const *lockInfo = sLockStore.LookupEntry(lockId);
+                if (lockInfo)
+                    for (int i = 0; i < 8; ++i)
+                    {
+                        switch (lockInfo->Type[i])
                         {
-                            qitem->is_looted = true;
-                            if (item->freeforall || loot->GetPlayerQuestItems().size() == 1)
-                                m_bot->SendNotifyLootItemRemoved(l);
+                            case LOCK_KEY_ITEM:
+                                if (lockInfo->Index[i] > 0)
+                                    reqItem = lockInfo->Index[i];
+                                break;
+                            case LOCK_KEY_SKILL:
+                                if (SkillByLockType(LockType(lockInfo->Index[i])) > 0)
+                                {
+                                    skillId = SkillByLockType(LockType(lockInfo->Index[i]));
+                                    reqSkillValue = lockInfo->Skill[i];
+                                }
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+
+                // use key on object if available
+                if (reqItem > 0 && m_bot->HasItemCount(reqItem, 1))
+                {
+                    UseItem(m_bot->GetItemByEntry(reqItem), TARGET_FLAG_OBJECT, m_lootCurrent);
+                    m_lootCurrent = ObjectGuid();
+                    return;
+                }
+                else
+                    keyFailed = true;
+            }
+
+            // determine bot's skill value for object's required skill
+            if (skillId != SKILL_NONE)
+                SkillValue = uint32(m_bot->GetPureSkillValue(skillId));
+
+            // bot has the specific skill or object requires no skill at all
+            if ((m_bot->HasSkill(skillId) && skillId != SKILL_NONE) || (skillId == SKILL_NONE && go))
+            {
+                if (SkillValue >= reqSkillValue)
+                {
+                    // add this GO to our collection list if active and is chest/ore/herb
+                    if (go && HasCollectFlag(COLLECT_FLAG_NEAROBJECT) && go->GetGoType() == GAMEOBJECT_TYPE_CHEST)
+                    {
+                        m_collectObjects.push_back(go->GetEntry());
+                        m_collectObjects.unique();
+                    }
+
+                    switch (skillId)
+                    {
+                        case SKILL_MINING:
+                            if (HasTool(TC_MINING_PICK) && CastSpell(MINING))
+                                return;
                             else
-                                loot->NotifyQuestItemRemoved(qitem->index);
+                                skillFailed = true;
+                            break;
+                        case SKILL_HERBALISM:
+                            if (CastSpell(HERB_GATHERING))
+                                return;
+                            else
+                                skillFailed = true;
+                            break;
+                        case SKILL_SKINNING:
+                            if (c && HasCollectFlag(COLLECT_FLAG_SKIN) &&
+                                HasTool(TC_SKINNING_KNIFE) && CastSpell(SKINNING, *c))
+                                return;
+                            else
+                                skillFailed = true;
+                            break;
+                        case SKILL_LOCKPICKING:
+                            if (CastSpell(PICK_LOCK_1))
+                                return;
+                            else
+                                skillFailed = true;
+                            break;
+                        case SKILL_NONE:
+                            if (CastSpell(3365)) //Spell 3365 = Opening?
+                                return;
+                            else
+                                skillFailed = true;
+                            break;
+                        default:
+                            TellMaster("I'm not sure how to get that.");
+                            skillFailed = true;
+                            sLog.outDebug("[PlayerbotAI]:DoLoot Skill %u is not implemented", skillId);
+                            break;
+                    }
+                }
+                else
+                {
+                    TellMaster("My skill is not high enough. It requires %u, but mine is %u.",
+                               reqSkillValue, SkillValue);
+                    skillFailed = true;
+                }
+            }
+            else
+            {
+                TellMaster("I do not have the required skill.");
+                skillFailed = true;
+            }
+
+            if (go) // only go's can be forced
+            {
+                // if pickable, check if a forcible item is available for the bot
+                if (skillId == SKILL_LOCKPICKING && (m_bot->HasSkill(SKILL_BLACKSMITHING) ||
+                                                     m_bot->HasSkill(SKILL_ENGINEERING)))
+                {
+                    // check for skeleton keys appropriate for lock value
+                    if (m_bot->HasSkill(SKILL_BLACKSMITHING))
+                    {
+                        Item *kItem = FindKeyForLockValue(reqSkillValue);
+                        if (kItem)
+                        {
+                            TellMaster("I have a skeleton key that can open it!");
+                            UseItem(kItem, TARGET_FLAG_OBJECT, m_lootCurrent);
+                            return;
                         }
                         else
                         {
-                            if (ffaitem)
-                            {
-                                ffaitem->is_looted = true;
-                                m_bot->SendNotifyLootItemRemoved(l);
-                            }
-                            else
-                            {
-                                if (conditem)
-                                    conditem->is_looted = true;
-                                loot->NotifyItemRemoved(l);
-                            }
+                            TellMaster("I have no skeleton keys that can open that lock.");
+                            forceFailed = true;
                         }
-                        if (!item->freeforall)
-                            item->is_looted = true;
-                        --loot->unlootedCount;
-                        m_bot->SendNewItem(newitem, uint32(item->count), false, false, true);
-                        m_bot->GetAchievementMgr().UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_LOOT_ITEM, item->itemid, item->count);
+                    }
+
+                    // check for a charge that can blast it open
+                    if (m_bot->HasSkill(SKILL_ENGINEERING))
+                    {
+                        Item *bItem = FindBombForLockValue(reqSkillValue);
+                        if (bItem)
+                        {
+                            TellMaster("I can blast it open!");
+                            UseItem(bItem, TARGET_FLAG_OBJECT, m_lootCurrent);
+                            return;
+                        }
+                        else
+                        {
+                            TellMaster("I have nothing to blast it open with.");
+                            forceFailed = true;
+                        }
                     }
                 }
+                else
+                    forceFailed = true;
             }
-            // release loot
-            // if( uint64 lguid = m_bot->GetLootGUID() && m_bot->GetSession() )
-            m_bot->GetSession()->DoLootRelease(m_lootCurrent);
-            //else if( !m_bot->GetSession() )
-            //    sLog.outDebug( "[PlayerbotAI]: %s has no session. Cannot release loot!", m_bot->GetName() );
 
-            // clear movement target, take next target on next update
-            m_bot->GetMotionMaster()->Clear();
-            m_bot->GetMotionMaster()->MoveIdle();
-            SetQuestNeedItems();
-            //sLog.outDebug( "[PlayerbotAI]: %s looted target 0x%08X", m_bot->GetName(), m_lootCurrent );
+            // if all attempts failed in some way then clear because it won't get SMSG_LOOT_RESPONSE
+            if (keyFailed && skillFailed && forceFailed)
+            {
+                sLog.outDebug("[PlayerbotAI]: DoLoot attempts failed on [%s]",
+                              go ? go->GetGOInfo()->name : c->GetCreatureInfo()->Name);
+                m_lootCurrent = ObjectGuid();
+                // clear movement target, take next target on next update
+                m_bot->GetMotionMaster()->Clear();
+                m_bot->GetMotionMaster()->MoveIdle();
+            }
         }
     }
 }
@@ -2053,15 +2531,15 @@ void PlayerbotAI::MovementReset()
         if (!m_followTarget) return;
 
         // target player is teleporting...
-        if (m_followTarget->GetTypeId() == TYPEID_PLAYER && ((Player*) m_followTarget)->IsBeingTeleported())
+        if (m_followTarget->GetTypeId() == TYPEID_PLAYER && ((Player *) m_followTarget)->IsBeingTeleported())
             return;
 
         // check if bot needs to teleport to reach target...
         if (!m_bot->isInCombat())
         {
-            if (m_followTarget->GetTypeId() == TYPEID_PLAYER && ((Player*) m_followTarget)->GetCorpse())
+            if (m_followTarget->GetTypeId() == TYPEID_PLAYER && ((Player *) m_followTarget)->GetCorpse())
             {
-                if (!FollowCheckTeleport(*((Player*) m_followTarget)->GetCorpse())) return;
+                if (!FollowCheckTeleport(*((Player *) m_followTarget)->GetCorpse())) return;
             }
             else if (!FollowCheckTeleport(*m_followTarget)) return;
         }
@@ -2108,7 +2586,7 @@ void PlayerbotAI::SetInFront(const Unit* obj)
     x = m_bot->m_movementInfo.GetPos()->x;
     y = m_bot->m_movementInfo.GetPos()->y;
     z = m_bot->m_movementInfo.GetPos()->z;
-    m_bot->m_movementInfo.ChangePosition(x,y,z,ori);
+    m_bot->m_movementInfo.ChangePosition(x, y, z, ori);
 
     m_bot->SendHeartBeat(false);
 }
@@ -2155,8 +2633,8 @@ void PlayerbotAI::UpdateAI(const uint32 p_time)
         {
             //sLog.outDebug( "[PlayerbotAI]: %s died and is not in correct state...", m_bot->GetName() );
             // clear loot list on death
-            m_lootCreature.clear();
-            m_lootCurrent = 0;
+            m_lootTargets.clear();
+            m_lootCurrent = ObjectGuid();
             // clear combat orders
             m_bot->SetSelectionGuid(ObjectGuid());
             m_bot->GetMotionMaster()->Clear(true);
@@ -2190,7 +2668,7 @@ void PlayerbotAI::UpdateAI(const uint32 p_time)
             if (!corpse)
                 //sLog.outDebug( "[PlayerbotAI]: %s has no corpse!", m_bot->GetName() );
                 return;
-             // teleport ghost from graveyard to corpse
+            // teleport ghost from graveyard to corpse
             //sLog.outDebug( "[PlayerbotAI]: Teleport %s to corpse...", m_bot->GetName() );
             FollowCheckTeleport(*corpse);
             // check if we are allowed to resurrect now
@@ -2237,13 +2715,17 @@ void PlayerbotAI::UpdateAI(const uint32 p_time)
             if (!pSpell || !pSpell->IsChannelActive())
                 DoNextCombatManeuver();
             else
-                SetIgnoreUpdateTime(1); // It's better to update AI more frequently during combat
+                SetIgnoreUpdateTime(1);  // It's better to update AI more frequently during combat
         }
         // bot was in combat recently - loot now
         else if (m_botState == BOTSTATE_COMBAT)
         {
             SetState(BOTSTATE_LOOTING);
             m_attackerInfo.clear();
+            if (HasCollectFlag(COLLECT_FLAG_COMBAT))
+                m_lootTargets.unique();
+            else
+                m_lootTargets.clear();
             SetIgnoreUpdateTime();
         }
         else if (m_botState == BOTSTATE_LOOTING)
@@ -2262,7 +2744,18 @@ void PlayerbotAI::UpdateAI(const uint32 p_time)
 
         // do class specific non combat actions
         else if (GetClassAI() && !m_bot->IsMounted())
+        {
             (GetClassAI())->DoNonCombatActions();
+
+            // have we been told to collect GOs
+            if (HasCollectFlag(COLLECT_FLAG_NEAROBJECT))
+            {
+                findNearbyGO();
+                // start looting if have targets
+                if (!m_lootTargets.empty())
+                    SetState(BOTSTATE_LOOTING);
+            }
+        }
     }
 }
 
@@ -2347,7 +2840,7 @@ bool PlayerbotAI::CastSpell(uint32 spellId)
 
     // Check spell range
     SpellRanges::iterator it = m_spellRangeMap.find(spellId);
-    if (it != m_spellRangeMap.end() && (int)it->second != 0)
+    if (it != m_spellRangeMap.end() && (int) it->second != 0)
     {
         float dist = m_bot->GetCombatDistance(pTarget);
         if (dist > it->second + 1.25) // See Spell::CheckRange for modifier value
@@ -2379,8 +2872,36 @@ bool PlayerbotAI::CastSpell(uint32 spellId)
         MovementClear();
     }
 
-    // actually cast spell
-    m_bot->CastSpell(pTarget, pSpellInfo, false);
+    uint32 target_type = TARGET_FLAG_UNIT;
+
+    if (pSpellInfo->Effect[0] == SPELL_EFFECT_OPEN_LOCK)
+        target_type = TARGET_FLAG_OBJECT;
+
+    if (pSpellInfo->Effect[0] == SPELL_EFFECT_OPEN_LOCK ||
+        pSpellInfo->Effect[0] == SPELL_EFFECT_SKINNING)
+    {
+        if (!m_lootCurrent.IsEmpty())
+        {
+            WorldPacket* const packet = new WorldPacket(CMSG_CAST_SPELL, 1 + 4 + 1 + 4 + 8);
+            *packet << uint8(0);                            // spells cast count;
+            *packet << spellId;
+            *packet << uint8(0);                            // unk_flags
+            *packet << uint32(target_type);
+            *packet << m_lootCurrent.WriteAsPacked();
+            m_bot->GetSession()->QueuePacket(packet);       // queue the packet to get around race condition
+
+            if (target_type == TARGET_FLAG_OBJECT)
+            {
+                WorldPacket* const packetgouse = new WorldPacket(CMSG_GAMEOBJ_REPORT_USE, 8);
+                *packetgouse << uint64(m_lootCurrent.GetRawValue());
+                m_bot->GetSession()->QueuePacket(packetgouse);  // queue the packet to get around race condition
+            }
+        }
+        else
+            return false;
+    }
+    else
+        m_bot->CastSpell(pTarget, pSpellInfo, false);       // actually cast spell
 
     Spell* const pSpell = m_bot->FindCurrentSpellBySpellId(spellId);
     if (!pSpell)
@@ -2557,7 +3078,7 @@ Item* PlayerbotAI::FindItem(uint32 ItemId)
 
     for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)  // 20 to 23 = 4
     {
-        const Bag* const pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);   // 255, 20 to 23
+        const Bag* const pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);   // 255, 20 to 23
         if (pBag)
             for (uint8 slot = 0; slot < pBag->GetBagSize(); ++slot)
             {
@@ -2574,6 +3095,38 @@ Item* PlayerbotAI::FindItem(uint32 ItemId)
                 }
             }
     }
+    return NULL;
+}
+
+Item* PlayerbotAI::FindKeyForLockValue(uint32 reqSkillValue)
+{
+    if (reqSkillValue <= 25 && m_bot->HasItemCount(SILVER_SKELETON_KEY, 1))
+        return m_bot->GetItemByEntry(SILVER_SKELETON_KEY);
+    if (reqSkillValue <= 125 && m_bot->HasItemCount(GOLDEN_SKELETON_KEY, 1))
+        return m_bot->GetItemByEntry(GOLDEN_SKELETON_KEY);
+    if (reqSkillValue <= 200 && m_bot->HasItemCount(TRUESILVER_SKELETON_KEY, 1))
+        return m_bot->GetItemByEntry(TRUESILVER_SKELETON_KEY);
+    if (reqSkillValue <= 300 && m_bot->HasItemCount(ARCANITE_SKELETON_KEY, 1))
+        return m_bot->GetItemByEntry(ARCANITE_SKELETON_KEY);
+    if (reqSkillValue <= 375 && m_bot->HasItemCount(TITANIUM_SKELETON_KEY, 1))
+        return m_bot->GetItemByEntry(TITANIUM_SKELETON_KEY);
+    if (reqSkillValue <= 400 && m_bot->HasItemCount(COBALT_SKELETON_KEY, 1))
+        return m_bot->GetItemByEntry(COBALT_SKELETON_KEY);
+
+    return NULL;
+}
+
+Item* PlayerbotAI::FindBombForLockValue(uint32 reqSkillValue)
+{
+    if (reqSkillValue <= 150 && m_bot->HasItemCount(SMALL_SEAFORIUM_CHARGE, 1))
+        return m_bot->GetItemByEntry(SMALL_SEAFORIUM_CHARGE);
+    if (reqSkillValue <= 250 && m_bot->HasItemCount(LARGE_SEAFORIUM_CHARGE, 1))
+        return m_bot->GetItemByEntry(LARGE_SEAFORIUM_CHARGE);
+    if (reqSkillValue <= 300 && m_bot->HasItemCount(POWERFUL_SEAFORIUM_CHARGE, 1))
+        return m_bot->GetItemByEntry(POWERFUL_SEAFORIUM_CHARGE);
+    if (reqSkillValue <= 350 && m_bot->HasItemCount(ELEMENTAL_SEAFORIUM_CHARGE, 1))
+        return m_bot->GetItemByEntry(ELEMENTAL_SEAFORIUM_CHARGE);
+
     return NULL;
 }
 
@@ -2599,17 +3152,17 @@ bool PlayerbotAI::PickPocket(Unit* pTarget)
         copper -= (silver * 100);
 
         out << "|r|cff009900" << m_bot->GetName() << " loots: " << "|h|cffffffff[|r|cff00ff00" << gold
-        << "|r|cfffffc00g|r|cff00ff00" << silver
-        << "|r|cffcdcdcds|r|cff00ff00" << copper
-        << "|r|cff993300c"
-        << "|h|cffffffff]";
+            << "|r|cfffffc00g|r|cff00ff00" << silver
+            << "|r|cffcdcdcds|r|cff00ff00" << copper
+            << "|r|cff993300c"
+            << "|h|cffffffff]";
 
         TellMaster(out.str().c_str());
     }
 
     if (loot->gold)
     {
-        m_bot->ModifyMoney( loot->gold );
+        m_bot->ModifyMoney(loot->gold);
         m_bot->GetAchievementMgr().UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_LOOT_MONEY, loot->gold);
         loot->gold = 0;
         loot->NotifyMoneyRemoved();
@@ -2638,13 +3191,30 @@ bool PlayerbotAI::PickPocket(Unit* pTarget)
     return false; // ensures that the rogue only pick pockets target once
 }
 
-bool PlayerbotAI::HasPick()
+bool PlayerbotAI::HasTool(uint32 TC)
 {
-    if (m_bot->HasItemTotemCategory(TC_MINING_PICK))
-        return true;
-
     std::ostringstream out;
-    out << "|cffffffffI do not have a pick!";
+
+    switch (TC)
+    {
+        case TC_MINING_PICK:
+
+            if (m_bot->HasItemTotemCategory(TC))
+                return true;
+            else
+                out << "|cffffffffI do not have a pick!";
+            break;
+
+        case TC_SKINNING_KNIFE:
+
+            if (m_bot->HasItemTotemCategory(TC))
+                return true;
+            else
+                out << "|cffffffffI do not have a skinning knife!";
+            break;
+        default:
+            out << "|cffffffffI do not know what tool that needs!";
+    }
     TellMaster(out.str().c_str());
     return false;
 }
@@ -2660,7 +3230,7 @@ bool PlayerbotAI::HasSpellReagents(uint32 spellId)
 
     for (uint32 i = 0; i < MAX_SPELL_REAGENTS; ++i)
     {
-        if(pSpellInfo->Reagent[i] <= 0)
+        if (pSpellInfo->Reagent[i] <= 0)
             continue;
 
         uint32 itemid = pSpellInfo->Reagent[i];
@@ -2697,7 +3267,16 @@ void PlayerbotAI::extractItemIds(const std::string& text, std::list<uint32>& ite
     }
 }
 
-bool PlayerbotAI::extractSpellId(const std::string& text, uint32 &spellId) const
+// Build an hlink for spells
+void PlayerbotAI::MakeSpellLink(const SpellEntry *sInfo, std::ostringstream &out, Player *player)
+{
+    LocaleConstant loc = LOCALE_enUS;
+    if (player)
+        loc = player->GetSession()->GetSessionDbcLocale();
+    out << "|cffffffff|Hspell:" << sInfo->Id << "|h[" << sInfo->SpellName[loc] << "]|h|r";
+}
+
+void PlayerbotAI::extractSpellId(const std::string& text, uint32 &spellId) const
 {
 
     //   Link format
@@ -2710,88 +3289,88 @@ bool PlayerbotAI::extractSpellId(const std::string& text, uint32 &spellId) const
 
     int i = text.find("Hspell:", pos);
     if (i == -1)
-        return false;
+        return;
 
     // DEBUG_LOG("extractSpellId first pos %u i %u",pos,i);
     pos = i + 7;     // start of window in text 16 + 7 = 23
     int endPos = text.find('|', pos);
     if (endPos == -1)
-        return false;
+        return;
 
     // DEBUG_LOG("extractSpellId second endpos : %u pos : %u",endPos,pos);
     std::string idC = text.substr(pos, endPos - pos);     // 26 - 23
     spellId = atol(idC.c_str());
     pos = endPos;     // end
-    return true;
 }
 
-bool PlayerbotAI::extractGOinfo(const std::string& text, uint32 &guid, uint32 &entry, int &mapid, float &x, float &y, float &z) const
+void PlayerbotAI::extractSpellIdList(const std::string& text, BotSpellList& m_spellsToLearn) const
+{
+
+    //   Link format
+    //   |cffffffff|Hspell:" << spellId << ":" << "|h[" << pSpellInfo->SpellName[loc] << "]|h|r";
+    //   cast |cff71d5ff|Hspell:686|h[Shadow Bolt]|h|r";
+    //   012345678901234567890123456
+    //        base = 16 >|  +7 >|
+
+    uint8 pos = 0;
+    while (true)
+    {
+        int i = text.find("Hspell:", pos);
+        if (i == -1)
+            break;
+
+        // DEBUG_LOG("extractSpellIdList first pos %u i %u",pos,i);
+        pos = i + 7;     // start of window in text 16 + 7 = 23
+        int endPos = text.find('|', pos);
+        if (endPos == -1)
+            break;
+
+        // DEBUG_LOG("extractSpellIdList second endpos : %u pos : %u",endPos,pos);
+        std::string idC = text.substr(pos, endPos - pos);     // 26 - 23
+        uint32 spellId = atol(idC.c_str());
+        pos = endPos;     // end
+
+        if (spellId)
+            m_spellsToLearn.push_back(spellId);
+    }
+}
+
+void PlayerbotAI::extractGOinfo(const std::string& text, std::list<uint64>& m_lootTargets) const
 {
 
     //    Link format
-    //    |cFFFFFF00|Hfound:" << guid << ':'  << entry << ':' << x << ':' << y << ':' << z  << ':' << mapid << ':' <<  "|h[" << gInfo->name << "]|h|r";
-    //    |cFFFFFF00|Hfound:5093:1731:-9295:-270:81.874:0:|h[Copper Vein]|h|r
+    //    |cFFFFFF00|Hfound:" << guid << ':'  << entry << ':'  <<  "|h[" << gInfo->name << "]|h|r";
+    //    |cFFFFFF00|Hfound:9582:1731|h[Copper Vein]|h|r
 
     uint8 pos = 0;
+    while (true)
+    {
+        // extract GO guid
+        int i = text.find("Hfound:", pos);     // base H = 11
+        if (i == -1)     // break if error
+            break;
 
-    // extract GO guid
-    int i = text.find("Hfound:", pos);     // base H = 11
-    if (i == -1)     // break if error
-        return false;
+        pos = i + 7;     //start of window in text 11 + 7 = 18
+        int endPos = text.find(':', pos);     // end of window in text 22
+        if (endPos == -1)     //break if error
+            break;
+        std::string guidC = text.substr(pos, endPos - pos);     // get string within window i.e guid 22 - 18 =  4
+        uint32 guid = atol(guidC.c_str());     // convert ascii to long int
 
-    pos = i + 7;     //start of window in text 11 + 7 = 18
-    int endPos = text.find(':', pos);     // end of window in text 22
-    if (endPos == -1)     //break if error
-        return false;
-    std::string guidC = text.substr(pos, endPos - pos);     // get string within window i.e guid 22 - 18 =  4
-    guid = atol(guidC.c_str());     // convert ascii to long int
+        // extract GO entry
+        pos = endPos + 1;
+        endPos = text.find(':', pos);     // end of window in text
+        if (endPos == -1)     //break if error
+            break;
 
-    // extract GO entry
-    pos = endPos + 1;
-    endPos = text.find(':', pos);     // end of window in text
-    if (endPos == -1)     //break if error
-        return false;
+        std::string entryC = text.substr(pos, endPos - pos);     // get string within window i.e entry
+        uint32 entry = atol(entryC.c_str());     // convert ascii to float
 
-    std::string entryC = text.substr(pos, endPos - pos);     // get string within window i.e entry
-    entry = atol(entryC.c_str());     // convert ascii to float
+        ObjectGuid lootCurrent = ObjectGuid(HIGHGUID_GAMEOBJECT, entry, guid);
 
-    // extract GO x
-    pos = endPos + 1;
-    endPos = text.find(':', pos);     // end of window in text
-    if (endPos == -1)     //break if error
-        return false;
-
-    std::string xC = text.substr(pos, endPos - pos);     // get string within window i.e x
-    x = atof(xC.c_str());     // convert ascii to float
-
-    // extract GO y
-    pos = endPos + 1;
-    endPos = text.find(':', pos);     // end of window in text
-    if (endPos == -1)     //break if error
-        return false;
-
-    std::string yC = text.substr(pos, endPos - pos);     // get string within window i.e y
-    y = atof(yC.c_str());     // convert ascii to float
-
-    // extract GO z
-    pos = endPos + 1;
-    endPos = text.find(':', pos);     // end of window in text
-    if (endPos == -1)     //break if error
-        return false;
-
-    std::string zC = text.substr(pos, endPos - pos);     // get string within window i.e z
-    z = atof(zC.c_str());     // convert ascii to float
-
-    //extract GO mapid
-    pos = endPos + 1;
-    endPos = text.find(':', pos);     // end of window in text
-    if (endPos == -1)     //break if error
-        return false;
-
-    std::string mapidC = text.substr(pos, endPos - pos);     // get string within window i.e mapid
-    mapid = atoi(mapidC.c_str());     // convert ascii to int
-    pos = endPos;     // end
-    return true;
+        if (guid)
+            m_lootTargets.push_back(lootCurrent.GetRawValue());
+    }
 }
 
 // extracts currency in #g#s#c format
@@ -2878,7 +3457,7 @@ void PlayerbotAI::findItemsInInv(std::list<uint32>& itemIdSearchList, std::list<
     // for all for items in other bags
     for (uint8 bag = INVENTORY_SLOT_BAG_START; itemIdSearchList.size() > 0 && bag < INVENTORY_SLOT_BAG_END; ++bag)
     {
-        Bag* const pBag = (Bag*) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+        Bag* const pBag = (Bag *) m_bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
         if (!pBag)
             continue;
 
@@ -2897,6 +3476,37 @@ void PlayerbotAI::findItemsInInv(std::list<uint32>& itemIdSearchList, std::list<
                 itemIdSearchList.erase(it);
                 break;
             }
+        }
+    }
+}
+
+void PlayerbotAI::findNearbyGO()
+{
+    if (m_collectObjects.empty())
+        return;
+
+    std::list<GameObject*> tempTargetGOList;
+    float radius = 20.0f;
+
+    for (BotLootEntry::iterator itr = m_collectObjects.begin(); itr != m_collectObjects.end(); ++itr)
+    {
+        uint32 entry = *(itr);
+
+        // search for GOs with entry, within range of m_bot
+        MaNGOS::GameObjectEntryInPosRangeCheck go_check(*m_bot, entry, m_bot->GetPositionX(), m_bot->GetPositionY(), m_bot->GetPositionZ(), radius);
+        MaNGOS::GameObjectListSearcher<MaNGOS::GameObjectEntryInPosRangeCheck> checker(tempTargetGOList, go_check);
+        Cell::VisitGridObjects(m_bot, checker, radius);
+
+        // no objects found, continue to next entry
+        if (tempTargetGOList.empty())
+            continue;
+
+        // add any objects found to our lootTargets
+        for (std::list<GameObject*>::iterator iter = tempTargetGOList.begin(); iter != tempTargetGOList.end(); ++iter)
+        {
+            GameObject* go = (*iter);
+            if (go->isSpawned())
+                m_lootTargets.push_back(go->GetObjectGuid().GetRawValue());
         }
     }
 }
@@ -2954,9 +3564,9 @@ void PlayerbotAI::UseItem(Item *item, uint32 targetFlag, ObjectGuid targetGUID)
 
     WorldPacket *packet = new WorldPacket(CMSG_USE_ITEM, 28);
     *packet << bagIndex << slot << cast_count << spellId << item_guid
-           << glyphIndex << unk_flags << targetFlag;
+            << glyphIndex << unk_flags << targetFlag;
 
-    if (targetFlag & (TARGET_FLAG_UNIT | TARGET_FLAG_ITEM))
+    if (targetFlag & (TARGET_FLAG_UNIT | TARGET_FLAG_ITEM | TARGET_FLAG_OBJECT))
         *packet << targetGUID.WriteAsPacked();
 
     m_bot->GetSession()->QueuePacket(packet);
@@ -2976,11 +3586,11 @@ void PlayerbotAI::UseItem(Item *item, uint32 targetFlag, ObjectGuid targetGUID)
     }
 
     uint8 duration, castTime;
-    castTime = (uint8)((float)castingTimeEntry->CastTime / 1000.0f);
+    castTime = (uint8) ((float) castingTimeEntry->CastTime / 1000.0f);
 
     if (item->GetProto()->Class == ITEM_CLASS_CONSUMABLE && item->GetProto()->SubClass == ITEM_SUBCLASS_FOOD)
     {
-        duration = (uint8)((float)GetSpellDuration(spellInfo) / 1000.0f);
+        duration = (uint8) ((float) GetSpellDuration(spellInfo) / 1000.0f);
         SetIgnoreUpdateTime(castTime + duration);
     }
     else
@@ -3224,8 +3834,8 @@ void PlayerbotAI::HandleCommand(const std::string& text, Player& fromPlayer)
         MovementReset();
         SetQuestNeedItems();
         UpdateAttackerInfo();
-        m_lootCreature.clear();
-        m_lootCurrent = 0;
+        m_lootTargets.clear();
+        m_lootCurrent = ObjectGuid();
         m_targetCombat = 0;
         // do we want to reset all states on this command?
 //		m_combatOrder = ORDERS_NONE;
@@ -3312,178 +3922,151 @@ void PlayerbotAI::HandleCommand(const std::string& text, Player& fromPlayer)
             EquipItem(**it);
     }
 
-    // find item in world
+    // find project: 20:50 02/12/10 rev.4 item in world and wait until ordered to follow
     else if (text.size() > 2 && text.substr(0, 2) == "f " || text.size() > 5 && text.substr(0, 5) == "find ")
     {
-        uint32 guid;
-        float x, y, z;
-        uint32 entry;
-        int mapid;
-        if (extractGOinfo(text, guid, entry, mapid, x, y, z))
-        {    // sLog.outDebug("find: guid : %u entry : %u x : (%f) y : (%f) z : (%f) mapid : %d",guid, entry, x, y, z, mapid);
-            m_bot->UpdateGroundPositionZ(x, y, z);
-            SetMovementOrder(MOVEMENT_STAY);
-            m_bot->GetMotionMaster()->MovePoint(mapid, x, y, z);
+        extractGOinfo(text, m_lootTargets);
+
+        m_lootCurrent = m_lootTargets.front();
+        m_lootTargets.pop_front();
+
+        GameObject *go = m_bot->GetMap()->GetGameObject(m_lootCurrent);
+        if (!go)
+        {
+            m_lootTargets.clear();
+            m_lootCurrent = ObjectGuid();
+            return;
         }
-        else
-            SendWhisper("I have no info on that object", fromPlayer);
+
+        SetMovementOrder(MOVEMENT_STAY);
+        m_bot->GetMotionMaster()->MovePoint(go->GetMapId(), go->GetPositionX(), go->GetPositionY(), go->GetPositionZ());
+        m_lootTargets.clear();
+        m_lootCurrent = ObjectGuid();
     }
 
-    // get project: 18:50 03/05/10 rev.3 allows bots to retrieve all lootable & quest items from gameobjects
+    // get project: 20:50 02/12/10 rev.4 compact edition, handles multiple linked gameobject & improves visuals
     else if (text.size() > 2 && text.substr(0, 2) == "g " || text.size() > 4 && text.substr(0, 4) == "get ")
     {
-        uint32 guid;
-        float x, y, z;
-        uint32 entry;
-        int mapid;
-        bool looted = false;
-        if (extractGOinfo(text, guid, entry, mapid, x, y, z))
+        extractGOinfo(text, m_lootTargets);
+        SetState(BOTSTATE_LOOTING);
+    }
+    else if (text == "g" || text == "get") // get a selected lootable corpse
+    {
+        ObjectGuid getOnGuid = fromPlayer.GetSelectionGuid();
+        if (!getOnGuid.IsEmpty())
         {
-
-            //sLog.outDebug("find: guid : %u entry : %u x : (%f) y : (%f) z : (%f) mapid : %d",guid, entry, x, y, z, mapid);
-            ObjectGuid lootCurrent = ObjectGuid(HIGHGUID_GAMEOBJECT, entry, guid);
-            GameObject *go = m_bot->GetMap()->GetGameObject(lootCurrent);
-            if (!go)
-            {
-                lootCurrent = 0;
-                return;
-            }
-
-            if (!go->isSpawned())
+            Creature *c = m_bot->GetMap()->GetCreature(getOnGuid);
+            if (!c)
                 return;
 
-            m_bot->UpdateGroundPositionZ(x, y, z);
-            m_bot->GetMotionMaster()->MovePoint(mapid, x, y, z);
-            m_bot->SetPosition(x, y, z, m_bot->GetOrientation());
-            m_bot->SendLoot(lootCurrent, LOOT_CORPSE);
-            Loot *loot = &go->loot;
-            uint32 lootNum = loot->GetMaxSlotInLootFor(m_bot);
-            // sLog.outDebug( "[PlayerbotAI]: GetGOType %u - %s looting: '%s' got %d items", go->GetGoType(), m_bot->GetName(), go->GetGOInfo()->name, loot->GetMaxSlotInLootFor( m_bot ));
-            if (lootNum == 0) // Handle opening gameobjects that contain no items
+            if (c->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SKINNABLE) || c->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE))
             {
-                uint32 lockId = go->GetGOInfo()->GetLockId();
-                LockEntry const *lockInfo = sLockStore.LookupEntry(lockId);
-                if (lockInfo)
-                    for (int i = 0; i < 8; ++i)
-                    {
-                        uint32 skillId = SkillByLockType(LockType(lockInfo->Index[i]));
-                        if (skillId > 0)
-                        {
-                            if (m_bot->HasSkill(skillId)) // Has skill
-                            {
-                                uint32 reqSkillValue = lockInfo->Skill[i];
-                                uint32 SkillValue = m_bot->GetPureSkillValue(skillId);
-                                if (SkillValue >= reqSkillValue)
-                                {
-                                    // sLog.outDebug("[PlayerbotAI]i: skillId : %u SkillValue : %u reqSkillValue : %u",skillId,SkillValue,reqSkillValue);
-                                    m_bot->UpdateGatherSkill(skillId, SkillValue, reqSkillValue);
-                                    looted = true;
-                                }
-                            }
-                            break;
-                        }
-                    }
+                m_lootTargets.push_back(getOnGuid.GetRawValue());
+                SetState(BOTSTATE_LOOTING);
             }
-            for (uint32 l = 0; l < lootNum; l++)
-            {
-                // sLog.outDebug("[PlayerbotAI]: lootNum : %u",lootNum);
-                QuestItem *qitem = 0, *ffaitem = 0, *conditem = 0;
-                LootItem *item = loot->LootItemInSlot(l, m_bot, &qitem, &ffaitem, &conditem);
-                if (!item)
-                    continue;
-
-                if (!qitem && item->is_blocked)
-                {
-                    m_bot->SendLootRelease(lootCurrent);
-                    continue;
-                }
-
-                if (m_needItemList[item->itemid] > 0)
-                {
-                    ItemPosCountVec dest;
-                    if (m_bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item->itemid, item->count) == EQUIP_ERR_OK)
-                    {
-                        Item * newitem = m_bot->StoreNewItem(dest, item->itemid, true, item->randomPropertyId);
-
-                        if (qitem)
-                        {
-                            qitem->is_looted = true;
-                            if (item->freeforall || loot->GetPlayerQuestItems().size() == 1)
-                                m_bot->SendNotifyLootItemRemoved(l);
-                            else
-                                loot->NotifyQuestItemRemoved(qitem->index);
-                        }
-                        else
-                        {
-                            if (ffaitem)
-                            {
-                                ffaitem->is_looted = true;
-                                m_bot->SendNotifyLootItemRemoved(l);
-                            }
-                            else
-                            {
-                                if (conditem)
-                                    conditem->is_looted = true;
-                                loot->NotifyItemRemoved(l);
-                            }
-                        }
-                        if (!item->freeforall)
-                            item->is_looted = true;
-                        --loot->unlootedCount;
-                        m_bot->SendNewItem(newitem, uint32(item->count), false, false, true);
-                        m_bot->GetAchievementMgr().UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_LOOT_ITEM, item->itemid, item->count);
-                        looted = true;
-                    }
-                    continue;
-                }
-
-                uint32 lockId = go->GetGOInfo()->GetLockId();
-                LockEntry const *lockInfo = sLockStore.LookupEntry(lockId);
-                if (lockInfo)
-                {
-                    uint32 skillId = 0;
-                    uint32 reqSkillValue = 0;
-                    for (int i = 0; i < 8; ++i)
-                    {
-                        skillId = SkillByLockType(LockType(lockInfo->Index[i]));
-                        if (skillId > 0)
-                        {
-                            reqSkillValue = lockInfo->Skill[i];
-                            break;
-                        }
-                    }
-
-                    if (m_bot->HasSkill(skillId) || skillId == SKILL_NONE) // Has skill or skill not required
-                    {
-                        if ((skillId == SKILL_MINING) && !HasPick())
-                            continue;
-
-                        ItemPosCountVec dest;
-                        if (m_bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item->itemid, item->count) == EQUIP_ERR_OK)
-                        {
-                            Item* pItem = m_bot->StoreNewItem (dest, item->itemid, true, item->randomPropertyId);
-                            uint32 SkillValue = m_bot->GetPureSkillValue(skillId);
-                            if (SkillValue >= reqSkillValue)
-                            {
-                                m_bot->SendNewItem(pItem, uint32(item->count), false, false, true);
-                                m_bot->UpdateGatherSkill(skillId, SkillValue, reqSkillValue);
-                                --loot->unlootedCount;
-                                looted = true;
-                            }
-                        }
-                    }
-                }
-            }
-            // release loot
-            if (looted)
-                m_bot->GetSession()->DoLootRelease(lootCurrent);
             else
-                m_bot->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING);
-            // sLog.outDebug( "[PlayerbotAI]: %s looted target 0x%08X", m_bot->GetName(), lootCurrent );
-            SetQuestNeedItems();
+                TellMaster("Target is not lootable.");
         }
         else
-            SendWhisper("I have no info on that object", fromPlayer);
+        {
+            TellMaster("No target is selected.");
+            m_bot->HandleEmoteCommand(EMOTE_ONESHOT_TALK);
+        }
+        return;
+    }
+
+    // Handle all collection related commands here
+    else if (text.size() >= 7 && text.substr(0, 7) == "collect")
+    {
+        std::string part = "";
+        std::string subcommand = "";
+
+        if (text.size() > 7 && text.substr(0, 8) == "collect ")
+            part = text.substr(8);  // Truncate 'collect ' part
+
+        while (true)
+        {
+            if (part.find(" ") > 0)
+            {
+                subcommand = part.substr(0, part.find(" "));
+                if (part.size() > subcommand.size())
+                    part = part.substr(subcommand.size() + 1);
+            }
+            else
+                subcommand = part;
+
+            if (subcommand == "combat")
+                SetCollectFlag(COLLECT_FLAG_COMBAT);
+            else if (subcommand == "loot")
+                SetCollectFlag(COLLECT_FLAG_LOOT);
+            else if (subcommand == "quest")
+                SetCollectFlag(COLLECT_FLAG_QUEST);
+            else if (subcommand == "profession" || subcommand == "skill")
+                SetCollectFlag(COLLECT_FLAG_PROFESSION);
+            else if (subcommand == "skin" && m_bot->HasSkill(SKILL_SKINNING))
+                SetCollectFlag(COLLECT_FLAG_SKIN);
+            else if (subcommand == "objects" || subcommand == "nearby")
+            {
+                SetCollectFlag(COLLECT_FLAG_NEAROBJECT);
+                if (!HasCollectFlag(COLLECT_FLAG_NEAROBJECT))
+                    m_collectObjects.clear();
+            }
+            else if (subcommand == "none" || subcommand == "nothing")
+            {
+                m_collectionFlags = 0;
+                m_collectObjects.clear();
+            }
+            else
+            {
+                std::string collout = "";
+                if (m_bot->HasSkill(SKILL_SKINNING))
+                    collout += ", skin";
+                // TODO: perhaps change the command syntax, this way may be lacking in ease of use
+                TellMaster("Collect <what>?: none, combat, loot, quest, profession, objects" + collout);
+                break;
+            }
+            if (part == subcommand)
+                break;
+        }
+
+        std::string collset = "";
+        if (HasCollectFlag(COLLECT_FLAG_LOOT))
+            collset += ", all loot";
+        if (HasCollectFlag(COLLECT_FLAG_PROFESSION))
+            collset += ", profession";
+        if (HasCollectFlag(COLLECT_FLAG_QUEST))
+            collset += ", quest";
+        if (HasCollectFlag(COLLECT_FLAG_SKIN))
+            collset += ", skin";
+        if (HasCollectFlag(COLLECT_FLAG_COMBAT))
+            collset += " items after combat";
+        else
+            collset += " items";
+
+        if (HasCollectFlag(COLLECT_FLAG_NEAROBJECT))
+        {
+            collset += " and nearby objects (";
+            if (!m_collectObjects.empty())
+            {
+                std::string strobjects = "";
+                for (BotLootEntry::iterator itr = m_collectObjects.begin(); itr != m_collectObjects.end(); ++itr)
+                {
+                    uint32 objectentry = *(itr);
+                    GameObjectInfo const * gInfo = ObjectMgr::GetGameObjectInfo(objectentry);
+                    strobjects += ", ";
+                    strobjects += gInfo->name;
+                }
+                collset += strobjects.substr(2);
+            }
+            else
+                collset += "use survey and get to set";
+            collset += ")";
+        }
+
+        if (collset.length() > 1)
+            TellMaster("I'm collecting " + collset.substr(2));
+        else
+            TellMaster("I'm collecting nothing.");
     }
 
     else if (text == "quests")
@@ -3533,7 +4116,7 @@ void PlayerbotAI::HandleCommand(const std::string& text, Player& fromPlayer)
         }
         PlayerbotChatHandler ch(GetMaster());
         int8 linkStart = text.find("|");
-        if (linkStart < 0 || !ch.dropQuest((char*) text.substr(linkStart).c_str()))
+        if (linkStart < 0 || !ch.dropQuest((char *) text.substr(linkStart).c_str()))
             ch.sysmessage("ERROR: could not drop quest");
         if (!oldSelectionGUID.IsEmpty())
             fromPlayer.SetSelectionGuid(oldSelectionGUID);
@@ -3770,7 +4353,7 @@ void PlayerbotAI::HandleCommand(const std::string& text, Player& fromPlayer)
         ch.SendSysMessage(negOut.str().c_str());
     }
 
-    // survey project: 18:30 29/04/10 rev.3 filter out event triggered objects & now updates list
+    // survey project: 20:50 02/12/10 rev.4 compact edition
     else if (text == "survey")
     {
         uint32 count = 0;
@@ -3809,10 +4392,6 @@ void PlayerbotAI::HandleCommand(const std::string& text, Player& fromPlayer)
                 Field *fields = result->Fetch();
                 uint32 guid = fields[0].GetUInt32();
                 uint32 entry = fields[1].GetUInt32();
-                float x = fields[2].GetFloat();
-                float y = fields[3].GetFloat();
-                float z = fields[4].GetFloat();
-                int mapid = fields[5].GetUInt16();
 
                 GameObject *go = m_bot->GetMap()->GetGameObject(ObjectGuid(HIGHGUID_GAMEOBJECT, entry, guid));
                 if (!go)
@@ -3821,13 +4400,285 @@ void PlayerbotAI::HandleCommand(const std::string& text, Player& fromPlayer)
                 if (!go->isSpawned())
                     continue;
 
-                detectout << "|cFFFFFF00|Hfound:" << guid << ":" << entry << ":" << x << ":" << y << ":" << z  << ":" << mapid  << ":" <<  "|h[" << go->GetGOInfo()->name << "]|h|r";
+                detectout << "|cFFFFFF00|Hfound:" << guid << ":" << entry  << ":" <<  "|h[" << go->GetGOInfo()->name << "]|h|r";
                 ++count;
             } while (result->NextRow());
 
             delete result;
         }
         SendWhisper(detectout.str().c_str(), fromPlayer);
+    }
+
+    // Handle class & professions training:
+    // skill                           -- Lists bot(s) Primary profession skills.
+    // skill train                     -- List available class or profession (Primary or Secondary) skills & spells, from selected trainer.
+    // skill learn [HLINK][HLINK] ..   -- Learn selected skill and spells, from selected trainer ([HLINK] from skill train).
+    // skill unlearn [HLINK][HLINK] .. -- Unlearn selected primary profession skill(s) and all associated spells ([HLINK] from skill)
+    else if (text.size() >= 5 && text.substr(0, 5) == "skill")
+    {
+        uint32 rank[8] = {0, 75, 150, 225, 300, 375, 450, 525};
+
+        std::ostringstream msg;
+
+        std::string part = "";
+        std::string subcommand = "";
+
+        if (text.size() > 5 && text.substr(0, 6) == "skill ")
+            part = text.substr(6);  // Truncate 'skill ' part
+
+        if (part.find(" ") > 0)
+        {
+            subcommand = part.substr(0, part.find(" "));
+            if (part.size() > subcommand.size())
+                part = part.substr(subcommand.size() + 1);
+        }
+        else
+            subcommand = part;
+
+        if (subcommand == "train" || subcommand == "learn")
+        {
+            uint32 totalCost = 0;
+
+            Unit* unit = ObjectAccessor::GetUnit(*m_bot, fromPlayer.GetSelectionGuid());
+            if (!unit)
+            {
+                SendWhisper("Please select the trainer!", fromPlayer);
+                return;
+            }
+
+            if (!unit->isTrainer())
+            {
+                SendWhisper("This is not a trainer!", fromPlayer);
+                return;
+            }
+
+            Creature *creature =  m_bot->GetMap()->GetCreature(fromPlayer.GetSelectionGuid());
+            if (!creature)
+                return;
+
+            if (!creature->IsTrainerOf(m_bot, false))
+            {
+                SendWhisper("This trainer can not teach me anything!", fromPlayer);
+                return;
+            }
+
+            // check present spell in trainer spell list
+            TrainerSpellData const* cSpells = creature->GetTrainerSpells();
+            TrainerSpellData const* tSpells = creature->GetTrainerTemplateSpells();
+            if (!cSpells && !tSpells)
+            {
+                SendWhisper("No spells can be learnt from this trainer", fromPlayer);
+                return;
+            }
+
+            // reputation discount
+            float fDiscountMod =  m_bot->GetReputationPriceDiscount(creature);
+
+            // Handle: Learning class or profession (primary or secondary) skill & spell(s) for selected trainer, skill learn [HLINK][HLINK][HLINK].. ([HLINK] from skill train)
+            if (subcommand == "learn")
+            {
+                msg << "I have learnt the following spells:\r";
+                uint32 totalSpellLearnt = 0;
+                m_spellsToLearn.clear();
+                extractSpellIdList(part, m_spellsToLearn);
+                for (std::list<uint32>::iterator it = m_spellsToLearn.begin(); it != m_spellsToLearn.end(); advance(it, 1))
+                {
+                    uint32 spellId = *it;
+
+                    if (!spellId)
+                        break;
+
+                    TrainerSpell const* trainer_spell = cSpells->Find(spellId);
+                    if (!trainer_spell)
+                        trainer_spell = tSpells->Find(spellId);
+
+                    if (!trainer_spell || !trainer_spell->learnedSpell)
+                        continue;
+
+                    // apply reputation discount
+                    uint32 cost = uint32(floor(trainer_spell->spellCost * fDiscountMod));
+                    // check money requirement
+                    if (m_bot->GetMoney() < cost)
+                        continue;
+
+                    m_bot->ModifyMoney(-int32(cost));
+                    // learn explicitly or cast explicitly
+                    if (trainer_spell->IsCastable())
+                        m_bot->CastSpell(m_bot, trainer_spell->spell, true);
+                    else
+                        m_bot->learnSpell(spellId, false);
+                    ++totalSpellLearnt;
+                    totalCost += cost;
+                    const SpellEntry *const pSpellInfo =  sSpellStore.LookupEntry(spellId);
+                    if (!pSpellInfo)
+                        continue;
+
+                    MakeSpellLink(pSpellInfo, msg, &fromPlayer);
+                    uint32 gold = uint32(cost / 10000);
+                    cost -= (gold * 10000);
+                    uint32 silver = uint32(cost / 100);
+                    cost -= (silver * 100);
+                    msg << " ";
+                    if (gold > 0)
+                        msg << gold <<  " |TInterface\\Icons\\INV_Misc_Coin_01:8|t";
+                    if (silver > 0)
+                        msg << silver <<  " |TInterface\\Icons\\INV_Misc_Coin_03:8|t";
+                    msg << cost <<  " |TInterface\\Icons\\INV_Misc_Coin_05:8|t\r";
+                }
+                uint32 gold = uint32(totalCost / 10000);
+                totalCost -= (gold * 10000);
+                uint32 silver = uint32(totalCost / 100);
+                totalCost -= (silver * 100);
+                msg << "Total of " << totalSpellLearnt << " spell";
+                if (totalSpellLearnt != 1) msg << "s";
+                msg << " learnt, ";
+                if (gold > 0)
+                    msg << gold <<  " |TInterface\\Icons\\INV_Misc_Coin_01:8|t";
+                if (silver > 0)
+                    msg << silver <<  " |TInterface\\Icons\\INV_Misc_Coin_03:8|t";
+                msg << totalCost <<  " |TInterface\\Icons\\INV_Misc_Coin_05:8|t spent.";
+            }
+            // Handle: List class or profession skill & spells for selected trainer, skill train
+            else
+            if (subcommand == "train")
+            {
+                msg << "The spells I can learn and their cost:\r";
+
+                TrainerSpellData const* trainer_spells = cSpells;
+                if (!trainer_spells)
+                    trainer_spells = tSpells;
+
+                for (TrainerSpellMap::const_iterator itr =  trainer_spells->spellList.begin(); itr !=  trainer_spells->spellList.end(); ++itr)
+                {
+                    TrainerSpell const* tSpell = &itr->second;
+
+                    if (!tSpell)
+                        break;
+
+                    if (!tSpell->learnedSpell && !m_bot->IsSpellFitByClassAndRace(tSpell->learnedSpell))
+                        continue;
+
+                    if  (sSpellMgr.IsPrimaryProfessionFirstRankSpell(tSpell->learnedSpell) && m_bot->HasSpell(tSpell->learnedSpell))
+                        continue;
+
+                    TrainerSpellState state =  m_bot->GetTrainerSpellState(tSpell);
+                    if (state != TRAINER_SPELL_GREEN)
+                        continue;
+
+                    uint32 spellId = tSpell->spell;
+                    const SpellEntry *const pSpellInfo =  sSpellStore.LookupEntry(spellId);
+                    if (!pSpellInfo)
+                        continue;
+                    uint32 cost = uint32(floor(tSpell->spellCost *  fDiscountMod));
+                    totalCost += cost;
+
+                    uint32 gold = uint32(cost / 10000);
+                    cost -= (gold * 10000);
+                    uint32 silver = uint32(cost / 100);
+                    cost -= (silver * 100);
+                    MakeSpellLink(pSpellInfo, msg, &fromPlayer);
+                    msg << " ";
+                    if (gold > 0)
+                        msg << gold <<  " |TInterface\\Icons\\INV_Misc_Coin_01:8|t";
+                    if (silver > 0)
+                        msg << silver <<  " |TInterface\\Icons\\INV_Misc_Coin_03:8|t";
+                    msg << cost <<  " |TInterface\\Icons\\INV_Misc_Coin_05:8|t\r";
+                }
+                uint32 moneyDiff = m_bot->GetMoney() - totalCost;
+                if (moneyDiff >= 0)
+                {
+                    // calculate how much money bot has
+                    uint32 gold = uint32(moneyDiff / 10000);
+                    moneyDiff -= (gold * 10000);
+                    uint32 silver = uint32(moneyDiff / 100);
+                    moneyDiff -= (silver * 100);
+                    msg << " ";
+                    if (gold > 0)
+                        msg << gold <<  " |TInterface\\Icons\\INV_Misc_Coin_01:8|t";
+                    if (silver > 0)
+                        msg << silver <<  " |TInterface\\Icons\\INV_Misc_Coin_03:8|t";
+                    msg << moneyDiff <<  " |TInterface\\Icons\\INV_Misc_Coin_05:8|t left.";
+                }
+                else
+                {
+                    moneyDiff *= -1;
+                    uint32 gold = uint32(moneyDiff / 10000);
+                    moneyDiff -= (gold * 10000);
+                    uint32 silver = uint32(moneyDiff / 100);
+                    moneyDiff -= (silver * 100);
+                    msg << "I need ";
+                    if (gold > 0)
+                        msg << " " << gold <<  " |TInterface\\Icons\\INV_Misc_Coin_01:8|t";
+                    if (silver > 0)
+                        msg << silver <<  " |TInterface\\Icons\\INV_Misc_Coin_03:8|t";
+                    msg << moneyDiff <<  " |TInterface\\Icons\\INV_Misc_Coin_05:8|t more to learn all the  spells!";
+                }
+            }
+        }
+        // Handle: Unlearning selected primary profession skill(s) and all associated spells, skill unlearn [HLINK][HLINK].. ([HLINK] from skill)
+        else
+        if (subcommand == "unlearn")
+        {
+            m_spellsToLearn.clear();
+            extractSpellIdList(part, m_spellsToLearn);
+        }
+        // Handle: Lists bot(s) primary profession skills, skill.
+        else
+        {
+            m_spellsToLearn.clear();
+            m_bot->skill(m_spellsToLearn);
+            msg << "My Primary Professions are: ";
+        }
+
+        for (std::list<uint32>::iterator it = m_spellsToLearn.begin(); it != m_spellsToLearn.end(); ++it)
+        {
+            if (sSpellMgr.IsPrimaryProfessionSpell(*it) && subcommand != "learn")
+            {
+                SpellLearnSkillNode const* spellLearnSkill = sSpellMgr.GetSpellLearnSkill(*it);
+
+                uint32 prev_spell = sSpellMgr.GetPrevSpellInChain(*it);
+                if (!prev_spell)                                    // first rank, remove skill
+                    GetPlayer()->SetSkill(spellLearnSkill->skill, 0, 0);
+                else
+                {
+                    // search prev. skill setting by spell ranks chain
+                    SpellLearnSkillNode const* prevSkill = sSpellMgr.GetSpellLearnSkill(prev_spell);
+                    while (!prevSkill && prev_spell)
+                    {
+                        prev_spell = sSpellMgr.GetPrevSpellInChain(prev_spell);
+                        prevSkill = sSpellMgr.GetSpellLearnSkill(sSpellMgr.GetFirstSpellInChain(prev_spell));
+                    }
+                    if (!prevSkill)                                 // not found prev skill setting, remove skill
+                        GetPlayer()->SetSkill(spellLearnSkill->skill, 0, 0);
+                }
+            }
+            else
+            if (IsPrimaryProfessionSkill(*it))
+                for (uint32 j = 0; j < sSkillLineAbilityStore.GetNumRows(); ++j)
+                {
+                    SkillLineAbilityEntry const *skillLine = sSkillLineAbilityStore.LookupEntry(j);
+                    if (!skillLine)
+                        continue;
+
+                    // has skill
+                    if (skillLine->skillId == *it && skillLine->learnOnGetSkill == 0)
+                    {
+                        SpellEntry const* spellInfo = sSpellStore.LookupEntry(skillLine->spellId);
+                        if (!spellInfo)
+                            continue;
+
+                        if (m_bot->GetSkillValue(*it) <= rank[sSpellMgr.GetSpellRank(skillLine->spellId)] && m_bot->HasSpell(skillLine->spellId))
+                        {
+                            // sLog.outDebug("(%u)(%u)(%u):",skillLine->spellId, rank[sSpellMgr.GetSpellRank(skillLine->spellId)], m_bot->GetSkillValue(*it));
+                            MakeSpellLink(spellInfo, msg, &fromPlayer);
+                            break;
+                        }
+                    }
+                }
+        }
+        SendWhisper(msg.str(), fromPlayer);
+        m_spellsToLearn.clear();
+        m_bot->GetPlayerbotAI()->GetClassAI();
     }
 
     // stats project: 11:30 15/12/10 rev.2 display bot statistics
@@ -3897,7 +4748,7 @@ void PlayerbotAI::HandleCommand(const std::string& text, Player& fromPlayer)
             uint32 itemId = itemIds.front();
             bool wasRewarded = false;
             ObjectGuid questRewarderGUID = m_bot->GetSelectionGuid();
-            Object* const pNpc = (WorldObject*) m_bot->GetObjectByTypeMask(questRewarderGUID, TYPEMASK_CREATURE_OR_GAMEOBJECT);
+            Object* const pNpc = (WorldObject *) m_bot->GetObjectByTypeMask(questRewarderGUID, TYPEMASK_CREATURE_OR_GAMEOBJECT);
             if (!pNpc)
                 return;
 
@@ -3937,7 +4788,7 @@ void PlayerbotAI::HandleCommand(const std::string& text, Player& fromPlayer)
         }
         else
         {
-            std::string msg = "What? follow, stay, (c)ast <spellname>, spells, (e)quip <itemlink>, (u)se <itemlink>, drop <questlink>, report, quests, stats";
+            std::string msg = "What? follow, stay, (c)ast <spellname>, spells, (e)quip <itemlink>, (u)se <itemlink>, drop <questlink>, report, quests, stats, collect";
             SendWhisper(msg, fromPlayer);
             m_bot->HandleEmoteCommand(EMOTE_ONESHOT_TALK);
         }

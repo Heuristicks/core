@@ -1913,12 +1913,12 @@ void ObjectMgr::LoadItemPrototypes()
             if(proto->DisplayInfoID != dbcitem->DisplayId)
             {
                 sLog.outErrorDb("Item (Entry: %u) not correct %u display id, must be %u (using it).",i,proto->DisplayInfoID,dbcitem->DisplayId);
-                const_cast<ItemPrototype*>(proto)->DisplayInfoID = dbcitem->DisplayId;
+                //const_cast<ItemPrototype*>(proto)->DisplayInfoID = dbcitem->DisplayId;
             }
             if(proto->Sheath != dbcitem->Sheath)
             {
                 sLog.outErrorDb("Item (Entry: %u) not correct %u sheath, must be %u  (using it).",i,proto->Sheath,dbcitem->Sheath);
-                const_cast<ItemPrototype*>(proto)->Sheath = dbcitem->Sheath;
+                //const_cast<ItemPrototype*>(proto)->Sheath = dbcitem->Sheath;
             }
         }
         else

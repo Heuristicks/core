@@ -955,6 +955,7 @@ enum PlayerLoginQueryIndex
     PLAYER_LOGIN_QUERY_LOADMAILS,
     PLAYER_LOGIN_QUERY_LOADMAILEDITEMS,
     PLAYER_LOGIN_QUERY_LOADTALENTS,
+    PLAYER_LOGIN_QUERY_LOADEXTRATALENTS,
     PLAYER_LOGIN_QUERY_LOADWEEKLYQUESTSTATUS,
     PLAYER_LOGIN_QUERY_LOADMONTHLYQUESTSTATUS,
     PLAYER_LOGIN_QUERY_LOADRANDOMBG,
@@ -2530,6 +2531,7 @@ class MANGOS_DLL_SPEC Player : public Unit
         void _LoadSkills(QueryResult *result);
         void _LoadSpells(QueryResult *result);
         void _LoadTalents(QueryResult *result);
+        void _LoadExtraTalents(QueryResult *result);
         void _LoadFriendList(QueryResult *result);
         bool _LoadHomeBind(QueryResult *result);
         void _LoadDeclinedNames(QueryResult *result);
@@ -2689,7 +2691,7 @@ class MANGOS_DLL_SPEC Player : public Unit
         time_t m_resetTalentsTime;
         uint32 m_usedTalentCount;
         uint32 m_questRewardTalentCount;
-
+        uint32 m_extraTalentPoints;
         // Social
         PlayerSocial *m_social;
 

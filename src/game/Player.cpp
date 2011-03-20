@@ -6828,6 +6828,7 @@ bool Player::RewardHonor(Unit *uVictim, uint32 groupsize, float honor)
 
     if (uVictim != NULL)
     {
+
         honor *= sWorld.getConfig(CONFIG_FLOAT_RATE_HONOR);
         honor *= (GetMaxPositiveAuraModifier(SPELL_AURA_MOD_HONOR_GAIN) + 100.0f)/100.0f;
 
@@ -6835,6 +6836,20 @@ bool Player::RewardHonor(Unit *uVictim, uint32 groupsize, float honor)
             honor /= groupsize;
 
         honor *= (((float)urand(8,12))/10);                 // approx honor: 80% - 120% of real honor
+
+        /*
+		*	IOC Honorable Kill Tournament
+		*/
+		if(GetMapId() == 628)
+		{
+			QueryResult* pQuery;
+			if(pQuery = WorldDatabase.PQuery("SELECT guid FROM player_kill WHERE guid = %u;",GetGUID()))
+				QueryResult* pUpdate = WorldDatabase.PQuery("UPDATE player_kill SET kills = kills + 1 WHERE guid = %u;",GetGUID());
+			else
+				QueryResult* pUpdate = WorldDatabase.PQuery("INSERT INTO player_kill (guid,kills) VALUES ('%u','1');",GetGUID());
+			delete pQuery;
+			QueryResult* pLog = WorldDatabase.PQuery("INSERT INTO player_kill_log (guid_killer,guid_killed) VALUES ('%u','%u');",GetGUID(),uVictim->GetGUID());
+		}
     }
 
     // honor - for show honor points in log
@@ -16155,6 +16170,7 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder *holder )
     _LoadRandomBGStatus(holder->GetResult(PLAYER_LOGIN_QUERY_LOADRANDOMBG));
 
     _LoadTalents(holder->GetResult(PLAYER_LOGIN_QUERY_LOADTALENTS));
+    _LoadExtraTalents(holder->GetResult(PLAYER_LOGIN_QUERY_LOADEXTRATALENTS));
 
     // after spell and quest load
     InitTalentForLevel();
@@ -17180,6 +17196,25 @@ void Player::_LoadTalents(QueryResult *result)
         delete result;
     }
 }
+
+void Player::_LoadExtraTalents(QueryResult *result)
+{
+    //QueryResult *result = CharacterDatabase.PQuery("SELECT extra_talent_points FROM character_donor WHERE guid = '%u'",GetGUIDLow());
+    if (result)
+    {
+        do
+        {
+            Field *fields = result->Fetch();
+
+            m_extraTalentPoints = fields[0].GetUInt32();
+		}
+		while(result->NextRow());
+		delete result;
+	}
+	else
+		m_extraTalentPoints = 0;
+}
+
 void Player::_LoadGroup(QueryResult *result)
 {
     //QueryResult *result = CharacterDatabase.PQuery("SELECT groupId FROM group_member WHERE memberGuid='%u'", GetGUIDLow());

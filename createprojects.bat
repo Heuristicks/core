@@ -4,12 +4,12 @@ cd build
 
 if %1!==! goto without
 
-cmake .. -G %1
+"C:\Users\Matt\My Files\Developement\SupremeWoW\CMake\bin\cmake.exe" .. -G %1
 if errorlevel 1 call cmake --help
 goto end
 
 :without
-cmake ..
+"C:\Users\Matt\My Files\Developement\SupremeWoW\CMake\bin\cmake.exe" ..
 
 :end
 cd ..

@@ -733,6 +733,9 @@ void Player::UpdateArmorPenetration()
             }
         }
     }
+
+    if(m_armorPenetrationPct > 80.0f)
+        m_armorPenetrationPct = 80.0f;
 }
 
 void Player::ApplyManaRegenBonus(int32 amount, bool apply)
